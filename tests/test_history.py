@@ -4,6 +4,7 @@ import unittest
 import zipfile
 
 import support  # noqa: F401  (sets up paths)
+import fields
 import history
 
 
@@ -96,6 +97,33 @@ class Drafting(unittest.TestCase):
 
 
 history_module = history
+
+
+class FillingFields(unittest.TestCase):
+    """The AI filling in a document's record-type fields: only values backed by a real quote are kept."""
+
+    def setUp(self):
+        self.real_ask = history.ask
+
+    def tearDown(self):
+        history.ask = self.real_ask
+
+    def test_only_quoted_values_that_fit_are_kept(self):
+        history.ask = lambda *a, **k: {"fields": [
+            {"name": "judge", "value": "Hon. R. Castellano", "quote": "ENTER: Hon. R. Castellano, Judge of the Family Court"},
+            {"name": "order_of_protection", "value": "yes", "quote": "an order of protection is issued directing"},
+            {"name": "docket_number", "value": "NA-99", "quote": "a docket number that isn't in the record"},
+            {"name": "case_type", "value": "Traffic court", "quote": "an order of protection is issued directing"},
+        ]}
+        text = "It is ORDERED that an order of protection is issued directing the father to stay away. " \
+               "ENTER: Hon. R. Castellano, Judge of the Family Court"
+        doc = {"chunks": [text], "document_type": "Court Order", "document_date": "", "pages": [page(text, 1)]}
+        definitions = [d for d in fields.DEFAULT_RECORD_TYPES["documents"]["Court Order"]]
+        filled = history.fill_fields("m", False, doc, definitions)
+        self.assertEqual(filled["judge"]["value"], "Hon. R. Castellano")
+        self.assertIs(filled["order_of_protection"]["value"], True)
+        self.assertNotIn("docket_number", filled)  # its quote isn't in the document
+        self.assertNotIn("case_type", filled)  # not one of the choices
 
 
 class WordExport(unittest.TestCase):

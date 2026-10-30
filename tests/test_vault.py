@@ -1,4 +1,5 @@
 """The encrypted store: records, IDs, edits, the audit trail, sign-in limits, passwords and upgrades."""
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -28,11 +29,11 @@ class Records(unittest.TestCase):
         self.assertNotEqual(self.vault.get_record("patients", uid)["record"]["created"], "1999")
 
     def test_edits_are_logged_with_old_and_new_values(self):
-        uid = self.vault.create_record("patients", {"name": "Edit Test", "placement": "Cottage 1"})
-        self.vault.update_record("patients", uid, {"placement": "Cottage 2", "name": "Edit Test"})
+        uid = self.vault.create_record("patients", {"name": "Edit Test", "status": "Pending"})
+        self.vault.update_record("patients", uid, {"status": "Active", "name": "Edit Test"})
         entry = self.vault.list_records("activity", patient_uid=uid)["rows"][0]
         self.assertEqual(entry["action"], "edited patient")
-        self.assertIn("current placement: Cottage 1 → Cottage 2", entry["detail"])
+        self.assertIn("status: Pending → Active", entry["detail"])
         self.assertNotIn("name", entry["detail"].split(":", 1)[1])  # unchanged fields aren't logged
         self.assertIn("Test Clinician", entry["actor"])
 
@@ -50,6 +51,60 @@ class Records(unittest.TestCase):
             self.vault.get_record("patients", uid)
         self.assertTrue(any(f"{uid}: Delete Test" in (r["detail"] or "") for r in self.vault.list_records("activity")["rows"]))
         self.assertTrue(self.vault.verify_audit()["ok"])
+
+
+class RecordTypes(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.vault = support.unlocked_vault()
+
+    def test_record_type_fields_are_saved_checked_and_logged(self):
+        uid = self.vault.create_record("patients", {"name": "Type Test", "record_type": "Crisis / stabilization",
+                                                    "program": "21-day stabilization"})
+        data = self.vault.get_record("patients", uid)
+        self.assertEqual(data["custom"]["program"], "21-day stabilization")
+        with self.assertRaisesRegex(ValueError, "must be one of"):
+            self.vault.update_record("patients", uid, {"custom": {"program": "Summer camp"}})
+        self.vault.update_record("patients", uid, {"custom": {"program": "60-day stabilization"}})
+        entry = self.vault.list_records("activity", patient_uid=uid)["rows"][0]
+        self.assertIn("program: 21-day stabilization → 60-day stabilization", entry["detail"])
+        self.assertTrue(self.vault.verify_audit()["ok"])
+
+    def test_new_patients_default_to_residential(self):
+        uid = self.vault.create_record("patients", {"name": "Default Type"})
+        self.assertEqual(self.vault.get_record("patients", uid)["record"]["record_type"], "Residential treatment")
+
+    def test_ai_values_never_overwrite_a_persons_edit(self):
+        patient = self.vault.create_record("patients", {"name": "AI Fill Test"})
+        doc = self.vault.add_document(patient, "order.pdf", b"%PDF", [{"page": 1, "text": "x", "scanned": False}])
+        info = {"document_type": "Court Order", "document_date": "", "author": ""}
+        doc_id = self.vault.internal("documents", doc)
+        self.vault.save_document_facts(doc_id, info, [], "m", {"judge": {"value": "Hon. A", "quote": "q", "page": 1}})
+        data = self.vault.get_record("documents", doc)
+        self.assertEqual((data["custom"]["judge"], data["ai_sources"]["judge"]["page"]), ("Hon. A", 1))
+        self.vault.update_record("documents", doc, {"custom": {"judge": "Hon. B"}})  # a person corrects it
+        self.vault.save_document_facts(doc_id, info, [], "m", {"judge": {"value": "Hon. C", "quote": "q", "page": 1}})
+        data = self.vault.get_record("documents", doc)
+        self.assertEqual(data["custom"]["judge"], "Hon. B")
+        self.assertNotIn("judge", data["ai_sources"])
+
+    def test_changing_a_fields_type_converts_values(self):
+        for name, cottage in (("Cottage A", "Cottage 2"), ("Cottage B", "cottage 3"), ("Cottage C", "the blue house")):
+            self.vault.create_record("patients", {"name": name, "cottage": cottage})
+        preview = self.vault.preview_field_change("patients", "Residential treatment", "cottage", "picklist",
+                                                  ["Cottage 1", "Cottage 2", "Cottage 3"])
+        self.assertGreaterEqual(preview["converted"], 2)  # other tests' patients may be counted too
+        self.assertIn("the blue house", [u["value"] for u in preview["unfit"]])
+        self.vault.change_field_type("patients", "Residential treatment", "cottage", "picklist",
+                                     ["Cottage 1", "Cottage 2", "Cottage 3"])
+        cottages = {r["name"]: self.vault.get_record("patients", r["id"])["custom"].get("cottage")
+                    for r in self.vault.list_records("patients", "Cottage ")["rows"] if r["name"].startswith("Cottage ")}
+        self.assertEqual(cottages, {"Cottage A": "Cottage 2", "Cottage B": "Cottage 3", "Cottage C": ""})
+        field = next(d for d in self.vault.definitions_for("patients", "Residential treatment") if d["name"] == "cottage")
+        self.assertEqual(field["type"], "picklist")
+        with self.assertRaises(ValueError):  # the new type is enforced from now on
+            self.vault.create_record("patients", {"name": "Cottage D", "cottage": "Cottage 9"})
+        self.vault.change_field_type("patients", "Residential treatment", "cottage", "text")  # back, for other tests
 
 
 class AuditTrail(unittest.TestCase):
@@ -104,6 +159,7 @@ class Upgrades(unittest.TestCase):
             CREATE TABLE activity (id INTEGER PRIMARY KEY, uid TEXT UNIQUE NOT NULL,
                 patient_id INTEGER REFERENCES patients(id) ON DELETE SET NULL, time TEXT, action TEXT, detail TEXT);
             INSERT INTO patients (uid, name) VALUES ('PT-AAAAAA', 'Old Patient');
+            INSERT INTO patients (uid, name, placement, admitted) VALUES ('PT-BBBBBB', 'Placed Patient', 'Cottage 4', '01/02/2026');
             INSERT INTO activity (uid, patient_id, time, action, detail) VALUES ('ACT-AAAAAA', 1, '2026-01-01T09:00:00', 'created patient', '');
             PRAGMA user_version = 1;""")
         return db
@@ -123,6 +179,11 @@ class Upgrades(unittest.TestCase):
             row = db.execute("SELECT patient_uid, hash FROM activity").fetchone()
             self.assertEqual(row["patient_uid"], "PT-AAAAAA")
             self.assertTrue(row["hash"])
+            # Version 3: the old placement and admission date moved into the Residential treatment record type.
+            placed = db.execute("SELECT record_type, custom FROM patients WHERE uid = 'PT-BBBBBB'").fetchone()
+            self.assertEqual(placed["record_type"], "Residential treatment")
+            self.assertEqual(json.loads(placed["custom"]), {"cottage": "Cottage 4", "admission_date": "01/02/2026"})
+            self.assertTrue(db.execute("SELECT COUNT(*) FROM field_defs").fetchone()[0])
             self.assertTrue(list((Path(folder) / "backups").glob("records-*.db")))
 
     def test_newer_data_is_refused(self):

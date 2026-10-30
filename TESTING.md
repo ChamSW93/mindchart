@@ -31,12 +31,14 @@ Updates install by themselves when you open MindChart. To quit, press ⌘Q; that
 2. On the patient's page, **Upload documents** and choose the files in Documents → **MindChart sample records (fictional)**.
 3. Click **Build history** and wait (it takes several minutes; you can keep using your Mac).
 4. Review the draft: check the citations, the red "disagree" boxes, and **Export to Word**.
-5. In the bar at the top, try:
+5. Open the court order, IEP and psychological evaluation from the patient's page. Check the details the AI filled in (marked **✦ AI**, with the quote it came from) and correct one with **Edit**.
+6. In the bar at the top, try:
    - *Which patients have an order of protection?*
+   - *Which cottage is Jordan in?*
    - *Add a note for Jordan: had a calm week, no incidents, sleeping 8 hours*
    - *Change Jordan's status to Discharged*
-6. Browse **Patients**, **Documents** and **Facts**, open a record and **Edit** it.
-7. Click **Lock MindChart**, then sign back in.
+7. Browse **Patients**, **Documents** and **Facts**, open a record and **Edit** it.
+8. Click **Lock MindChart**, then sign back in.
 
 ## Feedback
 

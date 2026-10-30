@@ -49,8 +49,8 @@ class Server(unittest.TestCase):
         support.unlocked_vault()
         status, created = self.request("POST", "/api/records/patients", {"name": "Server Test (fictional)"})
         self.assertEqual(status, 200)
-        status, record = self.request("POST", f"/api/records/patients/{created['id']}", {"placement": "Cottage 9"})
-        self.assertEqual(record["record"]["placement"], "Cottage 9")
+        status, record = self.request("POST", f"/api/records/patients/{created['id']}", {"custom": {"cottage": "Cottage 9"}})
+        self.assertEqual(record["custom"]["cottage"], "Cottage 9")
         self.assertEqual(self.request("GET", "/api/records/nonsense")[0], 400)
         self.assertEqual(self.request("GET", "/api/no/such/route")[0], 400)
         settings = self.request("GET", "/api/settings")[1]

@@ -312,11 +312,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         vault.log("built a history", vault.internal("patients", patient_uid), model)
         self.start_stream()
         try:
-            for update in history.build(docs, model, thinking):
+            for update in history.build(docs, model, thinking, vault.document_field_definitions()):
                 vault.touch()  # a long build counts as activity, so MindChart stays unlocked
                 if "document_read" in update:
                     read = update["document_read"]
-                    vault.save_document_facts(docs[read["index"]]["id"], read["info"], read["facts"], model)
+                    vault.save_document_facts(docs[read["index"]]["id"], read["info"], read["facts"], model, read.get("filled"))
                     continue
                 if "result" in update:
                     update["draft_id"] = vault.save_draft(patient_uid, model, update["result"])

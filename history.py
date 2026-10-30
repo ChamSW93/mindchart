@@ -227,6 +227,46 @@ def tidy(value):
     return value
 
 
+FILL_PROMPT = """You help a psychiatric nurse practitioner record key details from a clinical record. Fill in the
+fields listed below from the record's text. Rules:
+- Only use what the text states. Leave out any field the text doesn't state. Never guess.
+- "value": for yes/no fields, "yes" or "no"; for choice fields, exactly one of the listed choices; dates and
+  numbers exactly as written.
+- "quote": 5 to 30 consecutive words copied EXACTLY from the text that show the value.
+
+Fields:
+{fields}"""
+
+
+def fill_fields(model, thinking, doc, definitions):
+    """Fill in a document's record-type fields. Each value must come with a quote that's really in the document;
+    values without one, or that don't fit the field's type, are left out. Returns {name: {value, quote, page}}."""
+    import fields as fieldtypes  # here, so history.py doesn't need the field definitions otherwise
+    described = "\n".join(
+        f"- {d['name']}: {d['label']} ({d['type']}{': ' + ', '.join(d['options']) if d['options'] else ''})" for d in definitions)
+    schema = {"type": "object", "properties": {"fields": {"type": "array", "items": {
+        "type": "object", "properties": {"name": {"type": "string", "enum": [d["name"] for d in definitions]},
+                                         "value": {"type": "string", "maxLength": 600},
+                                         "quote": {"type": "string", "maxLength": 300}},
+        "required": ["name", "value", "quote"]}}}, "required": ["fields"]}
+    text = "".join(doc["chunks"][:2])
+    reply = ask(model, thinking, FILL_PROMPT.format(fields=described),
+                f"Record: {doc['document_type']}, dated {doc['document_date'] or 'unknown'}\n\n{text}", schema, max_tokens=3000)
+    by_name = {d["name"]: d for d in definitions}
+    filled = {}
+    for item in reply.get("fields", []):
+        definition = by_name.get(item.get("name"))
+        found, page = locate(item.get("quote", ""), doc["pages"])
+        if not definition or not found or item["name"] in filled or not str(item.get("value", "")).strip():
+            continue
+        try:
+            value = fieldtypes.coerce(definition, item["value"])
+        except ValueError:
+            continue  # e.g. a choice that isn't on the list
+        filled[item["name"]] = {"value": value, "quote": item["quote"], "page": page}
+    return filled
+
+
 def extract_facts(model, thinking, doc, chunk):
     """The facts in one part of a document. If the answer runs too long, read each half separately.
 
@@ -309,13 +349,14 @@ def cite(fact, documents):
     return f"D{fact['doc'] + 1}{page}"
 
 
-def build(documents, model, thinking):
+def build(documents, model, thinking, document_fields=None):
     """Run the whole process, yielding progress updates and finally the result.
 
     documents: [{"name": "file.pdf", "pages": [{"page", "text", "scanned"}, ...]}, ...]
     A document that was read before can include its saved "info" and "facts"; it isn't
     read again. Each newly read document is reported as {"document_read": ...} so it
     can be saved for next time.
+    document_fields: {record type: [field definitions the AI fills in]}; filled values come back in "document_read".
     """
     for doc in documents:
         doc["chunks"] = chunk_pages(doc["pages"])
@@ -360,7 +401,15 @@ def build(documents, model, thinking):
                 doc_facts.append({**f, "page": page, "verified": verified})
             step += 1
         facts.extend({**f, "id": len(facts) + i, "doc": d_index} for i, f in enumerate(doc_facts))
-        yield {"document_read": {"index": d_index, "info": info, "facts": doc_facts}}
+        filled = {}
+        definitions = (document_fields or {}).get(doc["document_type"]) or []
+        if definitions:
+            yield {"progress": f"Filling in {doc['document_type']} details for {label}", "step": step, "total": total}
+            try:
+                filled = fill_fields(model, thinking, doc, definitions)
+            except Exception as error:
+                yield {"warning": f"Couldn't fill in the details for {label}: {error}"}
+        yield {"document_read": {"index": d_index, "info": info, "facts": doc_facts, "filled": filled}}
 
     sections = []
     for key, title, _ in SECTIONS:

@@ -9,10 +9,13 @@ import datetime
 import json
 import re
 
+import fields as fieldtypes
 import history
 import vault
 
-PATIENT_FIELDS = [f["name"] for f in vault.OBJECTS["patients"]["fields"] if f.get("edit", True)]
+# The patient's shared fields plus every patient record type's own fields (a proposal can set either).
+PATIENT_FIELDS = [f["name"] for f in vault.OBJECTS["patients"]["fields"] if f.get("edit", True)] + list(dict.fromkeys(
+    d["name"] for defs in fieldtypes.DEFAULT_RECORD_TYPES["patients"].values() for d in defs))
 
 SCHEMA = {
     "type": "object",
@@ -39,7 +42,9 @@ Decide what the person wants:
 - "question": they want information from the records. Write ONE SQLite SELECT statement in "sql" using only the
   views below. To filter by a patient, use their record ID from the list at the end (patient_id = 'PT-...'),
   never their name. Match other text with LIKE and % wildcards (it ignores case). Add LIMIT 200. Never change data.
-- "new_patient": they want to add a patient. Fill "patient_fields" with what they gave (name is required).
+- "new_patient": they want to add a patient. Fill "patient_fields" with what they gave (name is required), including
+  "record_type" and that record type's own fields (for example "placement Cottage 4" means record_type
+  "Residential treatment" and cottage "Cottage 4").
 - "add_note": they're giving information about a patient to record (an observation, event, medication change,
   phone call, incident). Put the patient's ID or name in "patient". Write "note_text" as a clear clinical note in
   the third person keeping every detail they gave and adding nothing. "note_date" is the date they mention, else "".
@@ -63,6 +68,13 @@ Examples (with PT-XXXXXX standing for the patient's real record ID from the list
 - "How many active patients are there?" -> SELECT COUNT(*) AS active_patients FROM patients_view WHERE status = 'Active'
 - "Facts that aren't verified" -> SELECT patient, section, fact FROM facts_view WHERE verified = 0 LIMIT 200
 
+Record types. Patients have a record_type and documents a document_type; each record type has its own fields,
+stored as JSON in the view's "details" column. Read one with json_extract(details, '$.field_name'); yes/no fields are 1 or 0.
+{record_types}
+- "Which cottage is Sam in?" -> SELECT name, json_extract(details, '$.cottage') AS cottage FROM patients_view WHERE id = 'PT-XXXXXX'
+- "Court orders with an order of protection" -> SELECT patient, name, json_extract(details, '$.expires') AS expires
+  FROM documents_view WHERE document_type = 'Court Order' AND json_extract(details, '$.order_of_protection') = 1 LIMIT 200
+
 Fact "section" values: {sections}
 Patient "status" values: Active, Pending, Discharged. Fact "verified" is 1 or 0.
 
@@ -82,8 +94,12 @@ def build_prompt(app_name):
     views = "\n".join(f"- {name}_view({', '.join(columns)})" for name, columns in view_columns().items())
     patients = "\n".join(f"- {p['id']}: {p['name']}{' (DOB ' + p['dob'] + ')' if p['dob'] else ''}"
                          for p in vault.patients_for_assistant()) or "(none yet)"
+    record_types = "\n".join(
+        f"- {'Patient' if obj == 'patients' else 'Document'} \"{rt}\": "
+        + (", ".join(f"{d['name']} ({d['type']}{': ' + '/'.join(d['options']) if d['options'] else ''})" for d in defs) or "no own fields")
+        for obj, types in vault.field_definitions().items() for rt, defs in types.items())
     return PROMPT.format(app=app_name, today=datetime.date.today().strftime("%m/%d/%Y"), views=views,
-                         sections=", ".join(vault.SECTIONS), patients=patients)
+                         sections=", ".join(vault.SECTIONS), patients=patients, record_types=record_types)
 
 
 def find_patient(reference):

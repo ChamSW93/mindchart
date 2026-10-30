@@ -69,6 +69,15 @@ class Assistant(unittest.TestCase):
         self.replies = [{"intent": "add_note", "patient": "Nobody Atall", "note_text": "x"}]
         self.assertIn("couldn't find", assistant.handle("note for Nobody", "m", False, "MindChart")["text"])
 
+    def test_new_patient_with_record_type_fields(self):
+        self.replies = [{"intent": "new_patient", "explanation": "New patient.", "patient_fields": {
+            **{f: "" for f in assistant.PATIENT_FIELDS}, "name": "Maria Test (fictional)",
+            "record_type": "Residential treatment", "cottage": "Cottage 4"}}]
+        proposal = assistant.handle("New patient Maria, Cottage 4", "m", False, "MindChart")
+        self.assertEqual(proposal["fields"]["cottage"], "Cottage 4")
+        done = assistant.confirm(proposal)
+        self.assertEqual(self.vault.get_record("patients", done["id"])["custom"]["cottage"], "Cottage 4")
+
     def test_update_ignores_a_repeated_name(self):
         self.replies = [{"intent": "update_patient", "patient": self.patient,
                          "patient_fields": {**{f: "" for f in assistant.PATIENT_FIELDS}, "name": "Quinn Assistant (fictional)",

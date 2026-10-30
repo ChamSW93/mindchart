@@ -21,7 +21,13 @@ This puts **MindChart.app** in the Applications folder (and Launchpad), download
 ## Using it
 
 - **Sign in.** The first launch asks for your name (shown in the activity log) and a password, which encrypts all of MindChart's data. Every launch after that asks for the password. MindChart locks itself after 15 minutes without activity, when 🔒 Lock is clicked, and when the app quits or crashes. After 5 wrong passwords, each further attempt has to wait. **A lost password can't be recovered.** It can be changed in **Settings**.
-- **Records, like a CRM.** Patients, Documents, Facts, Drafts and Activity each have a list view and record pages. Every record has its own ID with a prefix for its type, such as `PT-7K3M9Q` (patient), `DOC-…`, `FCT-…`, `DRF-…` and `ACT-…`. Each type has its own fields, which can be edited on its record page.
+- **Records, like a CRM.** Patients, Documents, Facts, Drafts and Activity each have a list view and record pages. Every record has its own ID with a prefix for its type, such as `PT-7K3M9Q` (patient), `DOC-…`, `FCT-…`, `DRF-…` and `ACT-…`.
+- **Object → record type → fields.** Patients and documents have **record types**, and each record type adds its own fields to the object's shared ones:
+  - Patients: Residential treatment (cottage, admission and expected discharge dates), Crisis / stabilization, Foster care and Outpatient / community.
+  - Documents: Court Order (case type, court, docket number, judge, dates, order of protection, visitation terms), IEP (classification, class ratio, school, grade, services, accommodations, behavior plan), Psychological Evaluation (examiner, tests, Full Scale IQ and index scores), Psychiatric Evaluation, Discharge Summary, Progress Note, Clinician Note and Other.
+
+  When a document is read, **the AI fills in its record type's fields**, each backed by an exact quote that's checked against the source and shown under the value with an **✦ AI** badge. Values that someone has edited are never overwritten. The full list is in `fields.py`.
+- **Field types can change later.** Field definitions are stored as data. Turning free text (say, Cottage or Medications) into a picklist converts every saved value, lists any that don't fit, backs up first, and logs the change. Supported types: text, long text, number, date, date-time, checkbox, picklist and multi-select picklist.
 - **The command bar** (top of every page) takes plain English:
   - *Questions* such as "Which patients have an order of protection?" become a read-only database lookup, and the results show as a table. They can never change data.
   - *Logging* such as "Add a note for Jordan: started sertraline 25 mg today", "New patient Maria Lopez, DOB 03/04/2012" or "Change Jordan's status to Discharged" comes back as a proposal to check and edit. **Nothing is saved until Save is clicked.**
@@ -79,7 +85,7 @@ macOS "Reduce motion" turns animations off. Other downloaded models can be picke
 scripts/test.sh
 ```
 
-45 automated tests cover document reading (including OCR), quote checking and citations, the drafting flow, the encrypted store, the audit trail, sign-in limits, password changes, data upgrades, the command bar, the server's security checks and the updater. They run on **Apple's built-in Python** (the one every Mac has), so code that only works with a newer Python can't slip through. They also run automatically on GitHub for every change. They don't need the AI model: stand-in answers take its place.
+56 automated tests cover document reading (including OCR), quote checking and citations, the drafting flow, record types and field types (including converting a field's type), AI-filled fields, the encrypted store, the audit trail, sign-in limits, password changes, data upgrades, the command bar, the server's security checks and the updater. They run on **Apple's built-in Python** (the one every Mac has), so code that only works with a newer Python can't slip through. They also run automatically on GitHub for every change. They don't need the AI model: stand-in answers take its place.
 
 ## Updates
 
@@ -100,6 +106,7 @@ This runs the tests (and stops if any fail), builds the PDF reader and the Mac a
 | `server.py` | Local web server (listens only to this Mac, refuses other web pages), API, error log |
 | `vault.py` | Encrypted store, objects and fields, record IDs, tamper-evident activity log, data upgrades |
 | `models.py` | Which AI model suits this Mac, and downloading it |
+| `fields.py` | Record types and their fields, field types, and converting values when a type changes |
 | `history.py` | Fact extraction, quote checking, section drafting, Word export |
 | `assistant.py` | The command bar: questions and logging proposals |
 | `documents.py` | Reads PDF (with OCR for scans), Word, text and spreadsheet files |

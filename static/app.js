@@ -5,7 +5,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const state = { session: null, objects: null, sectionTitles: {}, models: [], dirtyDraft: false };
 const ICONS = { patients: "i-patients", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity" };
 const PREFIXES = { PT: "patients", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity" };
-const HIDDEN_COLUMNS = ["patient_id", "document_id", "notes", "quote", "read_by_model", "seq"];
+const HIDDEN_COLUMNS = ["patient_id", "document_id", "notes", "quote", "read_by_model", "seq", "details"];
 const EXAMPLES = [
   "Which patients have an order of protection?",
   "List current medications for each active patient",
@@ -276,7 +276,7 @@ async function homeView() {
       <h2>Patients <span class="count">${patients.length}</span>
         <span class="actions"><button class="small" id="newPatient">+ New patient</button></span></h2>
       <div id="newPatientForm"></div>
-      ${patients.length ? recordsTable("patients", patients, ["id", "name", "dob", "status", "placement", "documents"])
+      ${patients.length ? recordsTable("patients", patients, ["id", "name", "record_type", "dob", "status", "documents"])
         : '<p class="empty">No patients yet. Add one with the button above or the command bar.</p>'}
     </div>`;
   $("#view").querySelectorAll("[data-example]").forEach((b) => b.onclick = () => runCommand(b.dataset.example));
@@ -286,10 +286,12 @@ async function homeView() {
 function newPatientForm(target) {
   const fields = state.objects.patients.fields.filter((f) => f.edit !== false);
   target.innerHTML = `<form class="card" style="background:var(--panel-2);box-shadow:none" onsubmit="return false">
-      <div class="fields">${fields.map((f) => fieldInput("patients", f, f.name === "status" ? "Active" : "")).join("")}</div>
+      <div class="fields">${fields.map((f) => fieldInput("patients", f, f.name === "status" ? "Active" : f.name === "record_type" ? f.options[0] : "")).join("")}</div>
+      <div class="custom-fields"></div>
       <div class="actions" style="margin-top:12px"><button type="submit">Save patient</button>
         <button type="button" class="secondary" data-cancel>Cancel</button><span class="error"></span></div></form>`;
   const form = target.querySelector("form");
+  bindRecordType(form, "patients", {}, "custom.");
   form.querySelector("[data-cancel]").onclick = () => target.innerHTML = "";
   form.onsubmit = async () => {
     try {
@@ -341,11 +343,45 @@ async function listView(object, search = "") {
 
 // --- Record pages ------------------------------------------------------------------
 
-function fieldInput(object, field, value) {
-  const name = `name="${field.name}"`;
-  const wide = field.type === "longtext" ? "wide" : "";
+// --- Record types: each one has its own fields, shown below the shared ones ---------
+
+function recordTypeFields(object, recordType) {
+  return state.objects[object]?.record_types?.[recordType] || [];
+}
+
+// Show the chosen record type's fields in a form, and swap them when the record type changes.
+// prefix "custom." keeps them apart from the shared fields when the form is saved.
+function bindRecordType(form, object, values, prefix) {
+  const typeField = state.objects[object]?.record_type_field;
+  const select = typeField && form.querySelector(`[name="${typeField}"]`);
+  const box = form.querySelector(".custom-fields");
+  if (!select || !box) return;
+  const render = () => {
+    const defs = recordTypeFields(object, select.value);
+    box.innerHTML = defs.length ? `<h3>${esc(select.value)} details</h3>
+      <div class="fields">${defs.map((d) => fieldInput(object, d, values[d.name], prefix)).join("")}</div>` : "";
+  };
+  select.onchange = render;
+  render();
+}
+
+function displayValue(field, value) {
+  if (value === null || value === undefined || value === "" || (Array.isArray(value) && !value.length)) return '<span class="empty">—</span>';
+  if (field.type === "checkbox") return value ? '<span class="badge">Yes</span>' : '<span class="badge plain">No</span>';
+  return esc(Array.isArray(value) ? value.join(", ") : value);
+}
+
+function fieldInput(object, field, value, prefix = "") {
+  const name = `name="${prefix}${field.name}"`;
+  const wide = field.type === "longtext" || field.type === "multipicklist" ? "wide" : "";
   let input;
-  if (field.type === "picklist") {
+  if (field.type === "multipicklist") {
+    const chosen = Array.isArray(value) ? value : [];
+    input = `<div class="multi">${field.options.map((o) => `<label><input type="checkbox" ${name} value="${esc(o)}" data-multi
+      ${chosen.includes(o) ? "checked" : ""}> ${esc(o)}</label>`).join("")}</div>`;
+  } else if (field.type === "number") {
+    input = `<input type="number" step="any" ${name} value="${esc(value)}">`;
+  } else if (field.type === "picklist") {
     const options = field.options.map((o) => `<option value="${esc(o)}" ${o === value ? "selected" : ""}>${esc(field.name === "section" ? state.sectionTitles[o] || o : o)}</option>`);
     input = `<select ${name}><option value=""></option>${options.join("")}</select>`;
   } else if (field.type === "checkbox") {
@@ -359,22 +395,44 @@ function fieldInput(object, field, value) {
 }
 
 function formValues(form) {
-  const values = {};
-  form.querySelectorAll("[name]").forEach((el) => { values[el.name] = el.type === "checkbox" ? el.checked : el.value; });
+  const values = {}, custom = {};
+  form.querySelectorAll("[name]").forEach((el) => {
+    let target = values, key = el.name;
+    if (key.startsWith("custom.")) { target = custom; key = key.slice(7); }
+    if (el.dataset.multi !== undefined) {  // a multi-select picklist: one checkbox per choice
+      target[key] = target[key] || [];
+      if (el.checked) target[key].push(el.value);
+      return;
+    }
+    target[key] = el.type === "checkbox" ? el.checked : el.value;
+  });
+  if (Object.keys(custom).length) values.custom = custom;
   return values;
 }
 
-function detailsCard(object, record, editing) {
+function detailsCard(object, data, editing) {
   const spec = state.objects[object];
   const fields = spec.fields;
+  const record = data.record;
+  const recordType = spec.record_type_field ? record[spec.record_type_field] : null;
+  const custom = data.custom || {}, sources = data.ai_sources || {};
+  const typeDefs = recordType ? recordTypeFields(object, recordType) : [];
+  const customView = typeDefs.length ? `<h3>${esc(recordType)} details</h3><div class="fields">${typeDefs.map((d) => {
+      const source = sources[d.name];
+      return `<div class="field ${d.type === "longtext" || d.type === "multipicklist" ? "wide" : ""}"><label>${esc(d.label)}
+        ${source ? '<span class="ai-badge" title="Filled in by the AI. Check it against the quote.">✦ AI</span>' : ""}</label>
+        <div class="value">${displayValue(d, custom[d.name])}</div>
+        ${source ? `<div class="ai-quote">“${esc(source.quote)}”${source.page ? ` p.${source.page}` : ""}</div>` : ""}</div>`;
+    }).join("")}</div>` : "";
   const body = editing
     ? `<form id="editForm" onsubmit="return false"><div class="fields">${fields.filter((f) => f.edit !== false).map((f) => fieldInput(object, f, record[f.name])).join("")}</div>
+        <div class="custom-fields"></div>
         <div class="actions" style="margin-top:14px"><button type="submit">Save</button><button type="button" class="secondary" id="cancelEdit">Cancel</button><span class="error"></span></div></form>`
     : `<div class="fields">${fields.map((f) => `<div class="field ${f.type === "longtext" ? "wide" : ""}"><label>${esc(f.label)}</label>
         <div class="value">${display(object, f.name, record[f.name])}</div></div>`).join("")}
         ${record.patient && object !== "patients" ? `<div class="field"><label>Patient</label><div class="value">${recordLink(record.patient_id, esc(record.patient))}</div></div>` : ""}
         ${record.document && object === "facts" ? `<div class="field"><label>Document</label><div class="value">${recordLink(record.document_id, esc(record.document))}</div></div>` : ""}
-      </div>`;
+      </div>${customView}`;
   const canEdit = fields.some((f) => f.edit !== false);
   return `<div class="card"><h2>Details${canEdit && !editing ? '<span class="actions"><button class="secondary small" id="editBtn">Edit</button></span>' : ""}</h2>${body}</div>`;
 }
@@ -405,8 +463,9 @@ async function recordView(object, uid, editing = false) {
 
   const body = $("#recordBody");
   if (object === "drafts") return draftView(data, body);
-  body.innerHTML = detailsCard(object, record, editing);
+  body.innerHTML = detailsCard(object, data, editing);
   if (editing) {
+    bindRecordType($("#editForm"), object, data.custom || {}, "custom.");
     $("#cancelEdit").onclick = () => recordView(object, uid);
     $("#editForm").onsubmit = async () => {
       try {
@@ -688,13 +747,15 @@ function renderProposal(proposal) {
   const titles = { new_patient: "New patient", add_note: "New note", update_patient: "Update patient" };
   let fields = "";
   if (proposal.action === "new_patient") {
-    fields = state.objects.patients.fields.filter((f) => f.edit !== false).map((f) => fieldInput("patients", f, proposal.fields[f.name] || (f.name === "status" ? "Active" : ""))).join("");
+    fields = state.objects.patients.fields.filter((f) => f.edit !== false).map((f) => fieldInput("patients", f,
+      proposal.fields[f.name] || (f.name === "status" ? "Active" : f.name === "record_type" ? f.options[0] : ""))).join("");
   } else if (proposal.action === "add_note") {
     fields = `<div class="field wide"><label>Note</label><textarea name="text" rows="4">${esc(proposal.fields.text)}</textarea></div>
       <div class="field"><label>Date</label><input name="date" value="${esc(proposal.fields.date)}" placeholder="MM/DD/YYYY (today if blank)"></div>`;
   } else {
+    const typeDefs = Object.values(state.objects.patients.record_types || {}).flat();
     fields = Object.keys(proposal.fields).map((name) => {
-      const f = fieldSpec("patients", name);
+      const f = fieldSpec("patients", name) || typeDefs.find((d) => d.name === name);
       return f ? fieldInput("patients", f, proposal.fields[name]) : "";
     }).join("");
   }
@@ -702,9 +763,11 @@ function renderProposal(proposal) {
       <h3 class="kicker">${titles[proposal.action]} · check before saving</h3>
       <p>${esc(proposal.summary)}${proposal.patient ? ` <b>${recordLink(proposal.patient.id, esc(proposal.patient.name))}</b>` : ""}</p>
       <div class="fields">${fields}</div>
+      ${proposal.action === "new_patient" ? '<div class="custom-fields"></div>' : ""}
       <div class="actions" style="margin-top:14px"><button type="submit">Save</button><button type="button" class="secondary" data-cancel>Cancel</button><span class="error"></span></div>
     </form>`);
   const form = $("#commandResult form");
+  if (proposal.action === "new_patient") bindRecordType(form, "patients", proposal.fields, "");
   form.querySelector("[data-cancel]").onclick = () => { $("#commandResult").hidden = true; };
   form.onsubmit = async () => {
     const values = formValues(form);
