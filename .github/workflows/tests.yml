@@ -6,7 +6,7 @@ on:
   pull_request:
 jobs:
   test:
-    runs-on: macos-14
+    runs-on: macos-latest  # always the current Mac image, so retired versions can't stop the tests
     steps:
       - uses: actions/checkout@v4
       - name: Python version
