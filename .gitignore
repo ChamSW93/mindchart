@@ -1,0 +1,15 @@
+# Never commit patient data or local files. MindChart's data lives outside this folder
+# (~/Library/Application Support/MindChart), but these rules are a second safety net.
+*.sparsebundle
+*.db
+*.sqlite
+*.docx.tmp
+.unlocked/
+update.json
+
+# Build output and local tools
+dist/
+__pycache__/
+.DS_Store
+.claude/
+tools/pdftext

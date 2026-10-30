@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{APP_NAME}}</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <!-- Sign-in: the only thing shown until MindChart is unlocked -->
+  <div id="signin" hidden>
+    <form class="signin-card" id="signinForm" onsubmit="return false">
+      <div class="logo big"></div>
+      <h1>{{APP_NAME}}</h1>
+      <p class="muted" id="signinIntro"></p>
+      <input type="password" id="password" autocomplete="current-password" placeholder="Password">
+      <input type="password" id="password2" autocomplete="new-password" placeholder="Type it again" hidden>
+      <button id="signinBtn" type="submit"></button>
+      <p class="error" id="signinError"></p>
+      <p class="fine" id="signinFine"></p>
+    </form>
+  </div>
+
+  <!-- The app -->
+  <div id="app" hidden>
+    <aside id="sidebar">
+      <a class="brand" href="#/"><span class="logo"></span><span><b>{{APP_NAME}}</b><small>Psychiatric records</small></span></a>
+      <nav id="nav"></nav>
+      <div class="sidebar-foot">
+        <label class="muted small">AI model<select id="model"></select></label>
+        <div class="hardware" id="hardware"></div>
+        <a href="/chat.html" class="small">General chat →</a>
+        <button id="lockBtn" class="secondary small"><span class="i-lock"></span> Lock {{APP_NAME}}</button>
+      </div>
+    </aside>
+    <main>
+      <form id="command" onsubmit="return false">
+        <span class="i-spark"></span>
+        <input id="commandInput" autocomplete="off" placeholder="Ask a question or log something, e.g. “Add a note for Jordan: started sertraline 25 mg today”">
+        <button id="commandBtn" type="submit">Go</button>
+      </form>
+      <section id="commandResult" hidden></section>
+      <div id="view"></div>
+    </main>
+  </div>
+
+  <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx,.rtf,.txt" hidden>
+  <script src="/static/app.js"></script>
+</body>
+</html>
