@@ -1,7 +1,11 @@
 """Reading PDFs (including scanned ones), Word files, spreadsheets and CSVs."""
 import io
+import shutil
+import subprocess
+import tempfile
 import unittest
 import zipfile
+from pathlib import Path
 
 import support
 import documents
@@ -24,6 +28,31 @@ class Reading(unittest.TestCase):
         pages = self.read("Court_Order_2024_scanned.pdf")
         self.assertTrue(pages[0]["scanned"])
         self.assertIn("order of protection", pages[0]["text"].lower())
+
+    def test_photos_and_sideways_scans_are_read(self):
+        with tempfile.TemporaryDirectory() as folder:
+            photo, sideways = Path(folder) / "photo.png", Path(folder) / "sideways.png"
+            subprocess.run(["sips", "-s", "format", "png", str(support.SAMPLES / "Court_Order_2024_scanned.pdf"), "--out", str(photo)],
+                           capture_output=True, check=True)
+            subprocess.run(["sips", "-r", "90", str(photo), "--out", str(sideways)], capture_output=True, check=True)
+            for image in (photo, sideways):
+                pages = documents.read_pages(image.name, image.read_bytes())
+                self.assertEqual(pages[0]["page"], 1)
+                self.assertTrue(pages[0]["scanned"])
+                self.assertIn("order of protection", pages[0]["text"].lower(), image.name)
+
+    def test_pictures_in_word_files_are_read(self):
+        with tempfile.TemporaryDirectory() as folder:
+            picture, word = Path(folder) / "scan.png", Path(folder) / "with picture.docx"
+            subprocess.run(["sips", "-s", "format", "png", str(support.SAMPLES / "Court_Order_2024_scanned.pdf"), "--out", str(picture)],
+                           capture_output=True, check=True)
+            shutil.copy(support.SAMPLES / "IEP_2024.docx", word)
+            with zipfile.ZipFile(word, "a") as z:
+                z.write(picture, "word/media/image9.png")
+            page = documents.read_pages(word.name, word.read_bytes())[0]
+        self.assertTrue(page["scanned"])
+        self.assertIn("12:1:1", page["text"])  # the typed text
+        self.assertIn("order of protection", page["text"].lower())  # and the picture's
 
     def test_word_file(self):
         pages = self.read("IEP_2024.docx")

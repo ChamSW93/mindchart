@@ -19,6 +19,7 @@
       <input type="password" id="password2" autocomplete="new-password" placeholder="Type it again" hidden>
       <button id="signinBtn" type="submit"></button>
       <p class="error" id="signinError"></p>
+      <p class="secure-note"><span class="i-lock secure-icon"></span> Your records are encrypted on this Mac. Only your password opens them.</p>
       <p class="fine" id="signinFine"></p>
     </form>
   </div>
@@ -28,9 +29,12 @@
     <aside id="sidebar">
       <a class="brand" href="#/"><span class="logo"></span><span><b>{{APP_NAME}}</b><small>Psychiatric records</small></span></a>
       <div class="mcm-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+      <button class="secure-pill" id="securePill" title="How your records are protected">
+        <span class="i-lock secure-icon"></span><span>Encrypted · on this Mac</span></button>
       <nav id="nav"></nav>
       <div class="sidebar-foot">
-        <label class="muted small">AI model<select id="model"></select></label>
+        <div class="work" id="work" hidden></div>
+        <label class="muted small">AI model (runs on this Mac)<select id="model"></select></label>
         <div class="hardware" id="hardware"></div>
         <a href="/chat.html" class="small">General chat →</a>
         <button id="lockBtn" class="secondary small"><span class="i-lock"></span> Lock {{APP_NAME}}</button>
@@ -41,13 +45,19 @@
         <span class="i-spark"></span>
         <input id="commandInput" autocomplete="off" placeholder="Ask a question or log something, e.g. “Add a note for Jordan: started sertraline 25 mg today”">
         <button id="commandBtn" type="submit">Go</button>
+        <button type="button" id="helpBtn" class="help-btn" title="Help for this page" aria-label="Help for this page">?</button>
       </form>
       <section id="commandResult" hidden></section>
       <div id="view"></div>
     </main>
+    <aside id="help" hidden aria-label="Help"></aside>
   </div>
 
-  <input type="file" id="fileInput" multiple accept=".pdf,.doc,.docx,.rtf,.txt" hidden>
+  <input type="file" id="fileInput" multiple hidden
+    accept=".pdf,.doc,.docx,.rtf,.odt,.txt,.png,.jpg,.jpeg,.heic,.heif,.tif,.tiff,.gif,.bmp">
+  <div id="dropHint" aria-hidden="true"><div><span class="i-upload"></span><b>Drop to upload</b>
+    <span>PDFs, Word files, photos and faxes. You'll check each one before it's filed.</span></div></div>
   <script src="/static/app.js"></script>
+  <script src="/static/tour.js"></script>
 </body>
 </html>

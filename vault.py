@@ -16,6 +16,10 @@ OBJECTS below and used everywhere: the database, the app's pages, and the assist
   Draft      a history drafted for a patient
   Activity   the access log: who did what, when
 
+Files dropped into MindChart wait in an uploads inbox (also inside the encrypted store) until the clinician
+confirms which patient they belong to and what type they are. Each confirmation is kept as an example, so
+MindChart gets better at recognizing that kind of document (see learning.py).
+
 The data lives outside the app's folder, so tools used to work on the app's code never see it.
 """
 import contextlib
@@ -42,7 +46,7 @@ MOUNT = HOME / ".unlocked"
 DATABASE = MOUNT / "records.db"
 AUTO_LOCK_MINUTES = 15
 MIN_PASSWORD_LENGTH = 10
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BACKUPS_KEPT = 5
 MAX_ATTEMPTS = 5  # wrong passwords allowed before MindChart makes you wait
 
@@ -56,6 +60,19 @@ SETTINGS_TABLE = "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, val
 FIELD_DEFS_TABLE = """CREATE TABLE IF NOT EXISTS field_defs (
     object TEXT, record_type TEXT, name TEXT, label TEXT, type TEXT, options TEXT, ai INTEGER, position INTEGER,
     PRIMARY KEY (object, record_type, name));"""
+# The record types themselves, so new ones (say, a "Safety plan" document type) can be added in the app.
+RECORD_TYPES_TABLE = """CREATE TABLE IF NOT EXISTS record_types (
+    object TEXT, name TEXT, description TEXT, position INTEGER, PRIMARY KEY (object, name));"""
+# Files waiting for the clinician to confirm their patient and type. "suggestion" is what MindChart worked out.
+UPLOADS_TABLE = """CREATE TABLE IF NOT EXISTS uploads (
+    id INTEGER PRIMARY KEY, uid TEXT UNIQUE NOT NULL, name TEXT, original BLOB, pages TEXT, added TEXT,
+    patient_uid TEXT, state TEXT, suggestion TEXT);"""
+# Each confirmed document's type and opening text, which MindChart learns to recognize types from.
+# Examples go when their document is deleted, so deleting records leaves nothing behind.
+EXAMPLES_TABLE = """CREATE TABLE IF NOT EXISTS type_examples (
+    id INTEGER PRIMARY KEY, document_id INTEGER UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
+    document_type TEXT, name TEXT, text TEXT, added TEXT);"""
+EXAMPLE_CHARS = 3000  # how much of a document's opening text is kept as an example
 
 _last_activity = time.time()
 _lock = threading.Lock()
@@ -140,7 +157,9 @@ def table_sql(name):
         columns.append(f"{PARENT_COLUMN[spec['parent']]} INTEGER REFERENCES {spec['parent']}(id) ON DELETE {on_delete}")
     columns += [f"{f['name']} {column_type(f)}" for f in spec["fields"]]
     # "custom" holds the record type's own fields as JSON (see fields.py).
-    columns += {"patients": ["custom TEXT"], "documents": ["original BLOB", "pages TEXT", "read_at TEXT", "custom TEXT"],
+    # Documents also note whether they're waiting to be read in the background (read_state) and what to take from them (pull).
+    columns += {"patients": ["custom TEXT"], "documents": ["original BLOB", "pages TEXT", "read_at TEXT", "custom TEXT",
+                                                           "read_state TEXT", "pull TEXT"],
                 "drafts": ["result TEXT"],
                 # The log names its patient by record ID rather than a link that could change or be reused,
                 # and each entry carries a hash chained to the one before (see chain_hash).
@@ -160,7 +179,7 @@ CREATE VIEW patients_view AS
 CREATE VIEW documents_view AS
     SELECT d.uid AS id, p.uid AS patient_id, p.name AS patient, d.name, d.kind, d.document_type, d.document_date,
            d.author, d.added, d.read_by_model, (SELECT COUNT(*) FROM facts f WHERE f.document_id = d.id) AS facts,
-           d.custom AS details
+           d.read_state, d.custom AS details
     FROM documents d JOIN patients p ON p.id = d.patient_id;
 CREATE VIEW facts_view AS
     SELECT f.uid AS id, p.uid AS patient_id, p.name AS patient, d.uid AS document_id, d.name AS document,
@@ -271,8 +290,10 @@ def prepare_database(db):
                 db.execute("ROLLBACK")
                 raise
         db.isolation_level = ""
-    db.executescript("\n".join(table_sql(name) for name in OBJECTS) + SETTINGS_TABLE + FIELD_DEFS_TABLE + VIEWS)
+    db.executescript("\n".join(table_sql(name) for name in OBJECTS) + SETTINGS_TABLE + FIELD_DEFS_TABLE
+                     + RECORD_TYPES_TABLE + UPLOADS_TABLE + EXAMPLES_TABLE + VIEWS)
     seed_field_defs(db)
+    seed_record_types(db)
     db.commit()
     db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -462,10 +483,12 @@ def clean_fields(name, fields, creating=False):
         field = spec.get(key)
         if not field or field.get("edit") is False:
             continue
+        # Record types can be added in the app, so their choices come from the database.
+        options = record_type_names(name) if key == fieldtypes.RECORD_TYPE_FIELD.get(name) else field.get("options")
         if field["type"] == "checkbox":
             value = 1 if str(value).lower() in ("1", "true", "yes", "on") else 0
-        elif field["type"] == "picklist" and value not in ("", None) and value not in field["options"]:
-            raise ValueError(f"{field['label']} must be one of: {', '.join(field['options'])}")
+        elif field["type"] == "picklist" and value not in ("", None) and value not in options:
+            raise ValueError(f"{field['label']} must be one of: {', '.join(options)}")
         else:
             value = "" if value is None else str(value).strip()
         clean[key] = value
@@ -480,8 +503,12 @@ def clean_fields(name, fields, creating=False):
 def describe_objects():
     described = {name: dict(spec) for name, spec in OBJECTS.items()}
     for name, record_types in field_definitions().items():
-        described[name]["record_type_field"] = fieldtypes.RECORD_TYPE_FIELD[name]
+        type_field = fieldtypes.RECORD_TYPE_FIELD[name]
+        described[name]["record_type_field"] = type_field
         described[name]["record_types"] = record_types
+        described[name]["record_type_descriptions"] = record_type_descriptions(name)
+        described[name]["fields"] = [{**f, "options": list(record_types)} if f["name"] == type_field else f
+                                     for f in OBJECTS[name]["fields"]]
     return described
 
 
@@ -498,10 +525,48 @@ def seed_field_defs(db):
                                                                json.dumps(d["options"]), int(d["ai"]), position))
 
 
-def field_definitions():
-    """{object: {record type: [field definitions]}}, as currently set."""
-    result = {obj: {rt: [] for rt in types} for obj, types in fieldtypes.DEFAULT_RECORD_TYPES.items()}
+def seed_record_types(db):
+    """Add the default record types (with what each one is) if they aren't there yet."""
+    for obj, record_types in fieldtypes.DEFAULT_RECORD_TYPES.items():
+        for position, name in enumerate(record_types):
+            db.execute("INSERT OR IGNORE INTO record_types (object, name, description, position) VALUES (?, ?, ?, ?)",
+                       (obj, name, fieldtypes.TYPE_DESCRIPTIONS.get(name, ""), position))
+
+
+def record_type_names(obj):
     with connect() as db:
+        return [r[0] for r in db.execute("SELECT name FROM record_types WHERE object = ? ORDER BY position", (obj,))]
+
+
+def record_type_descriptions(obj):
+    with connect() as db:
+        return {r[0]: r[1] or "" for r in db.execute(
+            "SELECT name, description FROM record_types WHERE object = ? ORDER BY position", (obj,))}
+
+
+def add_record_type(obj, name, description=""):
+    """A new record type, such as a document type MindChart didn't know. It starts with no fields of its own."""
+    name, description = " ".join(name.split()), " ".join(description.split())
+    if obj not in fieldtypes.RECORD_TYPE_FIELD:
+        raise ValueError("Only patients and documents have record types")
+    if not name or len(name) > 60:
+        raise ValueError("Give the type a name of up to 60 characters")
+    if name.lower() in (n.lower() for n in record_type_names(obj)):
+        raise ValueError(f"There's already a type called {name}")
+    with connect() as db:
+        position = db.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM record_types WHERE object = ?", (obj,)).fetchone()[0]
+        db.execute("INSERT INTO record_types (object, name, description, position) VALUES (?, ?, ?, ?)",
+                   (obj, name, description[:300], position))
+    log(f"added a {OBJECTS[obj]['label'].lower()} type", None, name)
+    return name
+
+
+def field_definitions():
+    """{object: {record type: [field definitions]}}, as currently set, in the record types' order."""
+    with connect() as db:
+        result = {obj: {} for obj in fieldtypes.DEFAULT_RECORD_TYPES}
+        for r in db.execute("SELECT object, name FROM record_types ORDER BY object, position"):
+            result.setdefault(r["object"], {})[r["name"]] = []
         for r in db.execute("SELECT * FROM field_defs ORDER BY object, record_type, position"):
             result.setdefault(r["object"], {}).setdefault(r["record_type"], []).append(
                 {"name": r["name"], "label": r["label"], "type": r["type"], "options": json.loads(r["options"] or "[]"),
@@ -691,6 +756,10 @@ def update_record(name, uid, fields):
             values["edited"] = now()
         db.execute(f"UPDATE {name} SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?", (*values.values(), row_id))
         patient_id = patient_of(db, name, row_id)
+        if name == "documents" and values.get("document_type"):
+            learn_type(db, row_id, values["document_type"])  # a correction teaches MindChart too
+            if current.get("read_by_model") and current.get("kind") == "File":
+                db.execute("UPDATE documents SET read_state = 'fields' WHERE id = ?", (row_id,))  # fill in the new type's fields
     # The log keeps what each field was and what it became (inside the encrypted store), so any change can be traced.
     labels = {f["name"]: f["label"].lower() for f in OBJECTS[name]["fields"]}
     if custom_changes:
@@ -748,6 +817,170 @@ def add_note(patient_uid, text, date="", author="", title=""):
     return uid
 
 
+# --- The uploads inbox, and learning document types --------------------------------
+
+def add_upload(name, original, pages, patient_uid, suggestion):
+    """A file waiting for review. patient_uid: the patient whose page it was dropped on, if any."""
+    with connect() as db:
+        uid = new_uid("UP")
+        db.execute("INSERT INTO uploads (uid, name, original, pages, added, patient_uid, state, suggestion) "
+                   "VALUES (?, ?, ?, ?, ?, ?, 'waiting', ?)",
+                   (uid, name, original, json.dumps(pages), now(), patient_uid or None, json.dumps(suggestion)))
+        patient = db.execute("SELECT id FROM patients WHERE uid = ?", (patient_uid,)).fetchone() if patient_uid else None
+    log("uploaded a file for review", patient[0] if patient else None, f"{uid}: {name}")
+    return uid
+
+
+def page_summary(pages):
+    return {"pages": len(pages) if pages and pages[0]["page"] else None,
+            "scanned_pages": [p["page"] for p in pages if p.get("scanned")],
+            "unclear_pages": [p["page"] for p in pages if p.get("unclear")]}
+
+
+def list_uploads():
+    """Files waiting for review, oldest first, with the start of their text for a preview."""
+    with connect() as db:
+        rows = db.execute("SELECT uid, name, pages, added, patient_uid, state, suggestion FROM uploads ORDER BY id").fetchall()
+    uploads = []
+    for r in rows:
+        pages = json.loads(r["pages"])
+        uploads.append({"id": r["uid"], "name": r["name"], "added": r["added"], "patient_id": r["patient_uid"],
+                        "state": r["state"], "suggestion": json.loads(r["suggestion"] or "{}"),
+                        "preview": "\n\n".join(p["text"] for p in pages)[:4000], **page_summary(pages)})
+    return uploads
+
+
+def get_upload(uid):
+    with connect() as db:
+        row = db.execute("SELECT * FROM uploads WHERE uid = ?", (uid,)).fetchone()
+    if not row:
+        raise ValueError("That upload has already been dealt with")
+    return {**dict(row), "pages": json.loads(row["pages"]), "suggestion": json.loads(row["suggestion"] or "{}")}
+
+
+def next_upload_to_identify():
+    with connect() as db:
+        row = db.execute("SELECT uid FROM uploads WHERE state = 'waiting' ORDER BY id LIMIT 1").fetchone()
+    return get_upload(row[0]) if row else None
+
+
+def save_suggestion(uid, suggestion, state="ready"):
+    with connect() as db:
+        db.execute("UPDATE uploads SET suggestion = ?, state = ? WHERE uid = ?", (json.dumps(suggestion), state, uid))
+
+
+def discard_upload(uid):
+    with connect() as db:
+        row = db.execute("SELECT name FROM uploads WHERE uid = ?", (uid,)).fetchone()
+        if not row:
+            return
+        db.execute("DELETE FROM uploads WHERE uid = ?", (uid,))
+    log("discarded an upload", None, f"{uid}: {row[0]}")
+    with connect() as db:
+        db.execute("VACUUM")  # so the discarded file doesn't linger in free space
+
+
+def confirm_upload(uid, choice):
+    """File an upload under a patient as the type the clinician confirmed. Returns (document ID, patient ID).
+
+    choice: {"patient_id"} or {"new_patient": {fields}}, plus "document_type", "document_date", "author", and
+    "pull": {"facts": bool, "fields": [names]}, what to take from the document. The document is then read in the
+    background, the choice of what to pull is remembered for that type, and the confirmed type becomes an example.
+    """
+    upload = get_upload(uid)
+    document_type = choice.get("document_type") or ""
+    if document_type not in record_type_names("documents"):
+        raise ValueError("Choose the document's type")
+    patient_uid = choice.get("patient_id")
+    if choice.get("new_patient"):
+        patient_uid = create_record("patients", choice["new_patient"])
+    if not patient_uid:
+        raise ValueError("Choose which patient this document belongs to")
+    pull = choice.get("pull") or {"facts": True, "fields": None}
+    pull = {"facts": bool(pull.get("facts")), "fields": [str(f) for f in pull["fields"]] if pull.get("fields") is not None else None}
+    wants_reading = pull["facts"] or pull["fields"] is None or bool(pull["fields"])
+    with connect() as db:
+        patient_id = internal_id(db, "patients", patient_uid)
+        row_id, doc_uid = insert(db, "documents", {
+            "patient_id": patient_id, "name": upload["name"], "kind": "File", "document_type": document_type,
+            "document_date": str(choice.get("document_date") or "").strip(), "author": str(choice.get("author") or "").strip(),
+            "added": now(), "original": upload["original"], "pages": json.dumps(upload["pages"]),
+            "read_state": "queued" if wants_reading else None, "pull": json.dumps(pull)})
+        learn_type(db, row_id, document_type)
+        db.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                   (f"pull.{document_type}", json.dumps(pull)))
+        db.execute("DELETE FROM uploads WHERE uid = ?", (uid,))
+    log("added document", patient_id, f"{doc_uid}: {upload['name']} ({document_type})")
+    return doc_uid, patient_uid
+
+
+def pull_preferences():
+    """What the clinician last chose to take from each type of document: {type: {"facts", "fields"}}."""
+    with connect() as db:
+        return {r[0][5:]: json.loads(r[1]) for r in db.execute("SELECT key, value FROM settings WHERE key LIKE 'pull.%'")}
+
+
+def learn_type(db, document_id, document_type):
+    """Keep (or correct) a document's confirmed type, with its opening text, as an example to learn from."""
+    row = db.execute("SELECT name, pages FROM documents WHERE id = ?", (document_id,)).fetchone()
+    text = "\n".join(p["text"] for p in json.loads(row["pages"] or "[]"))[:EXAMPLE_CHARS]
+    db.execute("INSERT INTO type_examples (document_id, document_type, name, text, added) VALUES (?, ?, ?, ?, ?) "
+               "ON CONFLICT(document_id) DO UPDATE SET document_type = excluded.document_type",
+               (document_id, document_type, row["name"], text, now()))
+
+
+def type_examples():
+    with connect() as db:
+        return [dict(r) for r in db.execute("SELECT document_type, name, text FROM type_examples ORDER BY id")]
+
+
+def patients_for_matching():
+    with connect() as db:
+        return [dict(r) for r in db.execute("SELECT uid AS id, name, dob, mrn, guardian FROM patients ORDER BY name")]
+
+
+def next_document_to_read():
+    """The next confirmed document waiting to be read in the background, ready for history.read_document."""
+    with connect() as db:
+        row = db.execute("SELECT d.*, p.uid AS patient_uid FROM documents d JOIN patients p ON p.id = d.patient_id "
+                         "WHERE d.read_state IN ('queued', 'fields') ORDER BY d.id LIMIT 1").fetchone()
+    if not row:
+        return None
+    return {"id": row["id"], "uid": row["uid"], "name": row["name"], "pages": json.loads(row["pages"]),
+            "fields_only": row["read_state"] == "fields", "pull": json.loads(row["pull"] or "null"),
+            "info": {"document_type": row["document_type"] or "Other", "document_date": row["document_date"] or "",
+                     "author": row["author"] or ""}}
+
+
+def mark_unreadable(doc_id):
+    with connect() as db:
+        db.execute("UPDATE documents SET read_state = 'failed' WHERE id = ?", (doc_id,))
+
+
+def work_counts():
+    with connect() as db:
+        return {"uploads": db.execute("SELECT COUNT(*) FROM uploads").fetchone()[0],
+                "identifying": db.execute("SELECT COUNT(*) FROM uploads WHERE state = 'waiting'").fetchone()[0],
+                "to_read": db.execute("SELECT COUNT(*) FROM documents WHERE read_state IN ('queued', 'fields')").fetchone()[0]}
+
+
+def onboarding():
+    """The getting-started checklist: which of MindChart's main features have been tried so far."""
+    with connect() as db:
+        count = lambda sql, *args: db.execute(sql, args).fetchone()[0]
+        did = lambda action: count("SELECT COUNT(*) FROM activity WHERE action LIKE ?", action) > 0
+        steps = {"patient": count("SELECT COUNT(*) FROM patients") > 0,
+                 "upload": count("SELECT COUNT(*) FROM documents WHERE kind = 'File'") > 0,
+                 "question": did("asked a question"),
+                 "note": count("SELECT COUNT(*) FROM documents WHERE kind = 'Note'") > 0,
+                 "draft": count("SELECT COUNT(*) FROM drafts") > 0,
+                 "edit": did("edited %"),
+                 "export": did("exported a draft to Word"),
+                 "lock": did("locked")}
+        hidden = db.execute("SELECT value FROM settings WHERE key = 'checklist'").fetchone()
+    return {"steps": steps, "hidden": bool(hidden and hidden[0] == "hidden")}
+
+
 def documents_for_history(patient_uid, doc_uids, reread):
     """The documents to build a history from, with facts saved from earlier runs unless reread is set.
 
@@ -763,6 +996,8 @@ def documents_for_history(patient_uid, doc_uids, reread):
             if r["document_type"]:
                 doc["info"] = {"document_type": r["document_type"], "document_date": r["document_date"] or "",
                                "author": r["author"] or ""}
+            if r["pull"]:
+                doc["pull"] = json.loads(r["pull"])
             if r["read_by_model"] and not reread:
                 doc["facts"] = [
                     {"section": f["section"], "fact": f["fact"], "date": f["date"] or "", "quote": f["quote"] or "",
@@ -776,19 +1011,25 @@ def documents_for_history(patient_uid, doc_uids, reread):
 def save_document_facts(doc_id, info, facts, model, filled=None):
     """Save what a model found in a document, replacing anything found on an earlier read.
 
+    facts: None leaves the facts as they are (when only the record type's fields were filled in).
     filled: the record type's fields the AI filled in, {name: {"value", "quote", "page"}}. They never overwrite
     a value a person entered or edited; only empty fields, or ones the AI filled before, are updated.
     """
     with connect() as db:
-        stored = json.loads(db.execute("SELECT custom FROM documents WHERE id = ?", (doc_id,)).fetchone()[0] or "{}")
+        row = db.execute("SELECT custom FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        if not row:
+            return  # deleted while it was being read
+        stored = json.loads(row[0] or "{}")
         sources = stored.setdefault("_ai", {})
         for key, item in (filled or {}).items():
             if stored.get(key) in (None, "", [], False) or key in sources:
                 stored[key] = item["value"]
                 sources[key] = {"quote": item["quote"], "page": item.get("page")}
         db.execute("UPDATE documents SET document_type = ?, document_date = ?, author = ?, read_by_model = ?, read_at = ?, "
-                   "custom = ? WHERE id = ?", (info.get("document_type"), info.get("document_date"), info.get("author"),
-                                                model, now(), json.dumps(stored), doc_id))
+                   "custom = ?, read_state = 'read' WHERE id = ?", (info.get("document_type"), info.get("document_date"),
+                                                                     info.get("author"), model, now(), json.dumps(stored), doc_id))
+        if facts is None:
+            return
         db.execute("DELETE FROM facts WHERE document_id = ?", (doc_id,))
         for f in facts:
             insert(db, "facts", {"document_id": doc_id, "section": f.get("section"), "fact": f.get("fact"),
@@ -872,3 +1113,19 @@ def upgrade_to_v3(db):
 
 
 MIGRATIONS[3] = upgrade_to_v3
+
+
+def upgrade_to_v4(db):
+    """Version 4: the uploads inbox, learning document types, types added in the app, and background reading."""
+    columns = {r[1] for r in db.execute("PRAGMA table_info(documents)")}
+    if columns:  # a table that doesn't exist yet is created with these columns
+        for column in ("read_state", "pull"):
+            if column not in columns:
+                db.execute(f"ALTER TABLE documents ADD COLUMN {column} TEXT")
+        db.execute("UPDATE documents SET read_state = 'read' WHERE read_by_model IS NOT NULL")
+    for table in (RECORD_TYPES_TABLE, UPLOADS_TABLE, EXAMPLES_TABLE):
+        db.execute(table)
+    seed_record_types(db)
+
+
+MIGRATIONS[4] = upgrade_to_v4

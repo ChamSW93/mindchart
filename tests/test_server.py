@@ -57,10 +57,36 @@ class Server(unittest.TestCase):
         self.assertTrue(settings["audit"]["ok"])
         self.assertEqual(self.request("POST", f"/api/records/patients/{created['id']}/delete", {})[0], 200)
 
+    def test_uploads_wait_for_review_then_are_filed(self):
+        support.unlocked_vault()
+        support.ensure_pdf_reader()
+        patient = self.request("POST", "/api/records/patients", {"name": "Server Upload (fictional)"})[1]["id"]
+        sample = (support.SAMPLES / "Psychiatric_Evaluation_2023.pdf").read_bytes()
+        status, created = self.request("POST", f"/api/uploads?name=eval.pdf&patient={patient}", sample,
+                                       headers={"Content-Type": "application/pdf"})
+        self.assertEqual(status, 200)
+        listed = self.request("GET", "/api/uploads")[1]
+        upload = next(u for u in listed["uploads"] if u["id"] == created["id"])
+        self.assertEqual(upload["suggestion"]["learned_type"], "Psychiatric Evaluation")  # recognized before the AI has run
+        self.assertEqual(upload["suggestion"]["patient_id"], patient)  # dropped on this patient's page
+        self.assertEqual(self.request("GET", "/api/work")[0], 200)
+        status, filed = self.request("POST", f"/api/uploads/{created['id']}/confirm",
+                                     {"patient_id": patient, "document_type": "Psychiatric Evaluation"})
+        self.assertEqual((status, filed["patient_id"]), (200, patient))
+        self.assertEqual(self.request("GET", f"/api/records/documents/{filed['document_id']}")[1]["record"]["document_type"],
+                         "Psychiatric Evaluation")
+
+    def test_the_tour_is_offered_until_finished_or_skipped(self):
+        support.unlocked_vault()
+        self.request("POST", "/api/settings/tour", {"state": ""})
+        self.assertEqual(self.request("GET", "/api/onboarding")[1]["tour"], "")
+        self.request("POST", "/api/settings/tour", {"state": "skipped"})
+        self.assertEqual(self.request("GET", "/api/onboarding")[1]["tour"], "skipped")
+
     def test_huge_uploads_are_refused(self):
         support.unlocked_vault()
         connection = http.client.HTTPConnection("127.0.0.1", PORT, timeout=30)
-        connection.putrequest("POST", "/api/patients/PT-XXXXXX/documents?name=big.pdf")
+        connection.putrequest("POST", "/api/uploads?name=big.pdf")
         connection.putheader("Host", f"localhost:{PORT}")
         connection.putheader("X-MindChart", "1")
         connection.putheader("Content-Length", str(server.MAX_UPLOAD_BYTES + 1))

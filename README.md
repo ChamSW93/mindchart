@@ -1,6 +1,6 @@
 # MindChart
 
-A private, offline app for keeping child and adolescent psychiatric records and drafting the **history section of a psychiatric evaluation** from source records: past psychiatric and psychological evaluations, clinical notes, IEPs and court orders, in PDF or Word format.
+A private, offline app for keeping child and adolescent psychiatric records and drafting the **history section of a psychiatric evaluation** from source records: past psychiatric and psychological evaluations, clinical notes, IEPs and court orders, as PDFs, Word files, photos or faxes.
 
 Everything runs on the Mac. The app, its server and the AI model (through [Ollama](https://ollama.com)) never send record contents over the internet.
 
@@ -21,17 +21,29 @@ This puts **MindChart.app** in the Applications folder (and Launchpad), download
 ## Using it
 
 - **Sign in.** The first launch asks for your name (shown in the activity log) and a password, which encrypts all of MindChart's data. Every launch after that asks for the password. MindChart locks itself after 15 minutes without activity, when 🔒 Lock is clicked, and when the app quits or crashes. After 5 wrong passwords, each further attempt has to wait. **A lost password can't be recovered.** It can be changed in **Settings**.
+- **A tour, and help on every page.** The first time MindChart opens (and once after updating to 0.5.0), a short tour points out each part of the app; it can be skipped. A getting-started checklist on Home ticks itself off as each feature is tried. The **?** button next to the command bar explains what can be done on the current page, and Settings can restart the tour.
+- **Security, in plain language.** A green padlock marks where records are protected: the sign-in screen, the sidebar ("Encrypted · on this Mac"), Uploads and Settings. Clicking it explains, in plain terms, what keeps records private and what's up to the clinician (exported Word files, the Mac's own FileVault and screen lock).
 - **Records, like a CRM.** Patients, Documents, Facts, Drafts and Activity each have a list view and record pages. Every record has its own ID with a prefix for its type, such as `PT-7K3M9Q` (patient), `DOC-…`, `FCT-…`, `DRF-…` and `ACT-…`.
 - **Object → record type → fields.** Patients and documents have **record types**, and each record type adds its own fields to the object's shared ones:
   - Patients: Residential treatment (cottage, admission and expected discharge dates), Crisis / stabilization, Foster care and Outpatient / community.
-  - Documents: Court Order (case type, court, docket number, judge, dates, order of protection, visitation terms), IEP (classification, class ratio, school, grade, services, accommodations, behavior plan), Psychological Evaluation (examiner, tests, Full Scale IQ and index scores), Psychiatric Evaluation, Discharge Summary, Progress Note, Clinician Note and Other.
+  - Documents: Court Order (case type, court, docket number, judge, dates, order of protection, visitation terms), IEP (classification, class ratio, school, grade, services, accommodations, behavior plan), Psychological Evaluation (examiner, tests, Full Scale IQ and index scores), Psychiatric Evaluation, Discharge Summary, Progress Note, Clinician Note and Other. New document types (say, Safety Plan) can be added from an upload's review card.
 
   When a document is read, **the AI fills in its record type's fields**, each backed by an exact quote that's checked against the source and shown under the value with an **✦ AI** badge. Values that someone has edited are never overwritten. The full list is in `fields.py`.
 - **Field types can change later.** Field definitions are stored as data. Turning free text (say, Cottage or Medications) into a picklist converts every saved value, lists any that don't fit, backs up first, and logs the change. Supported types: text, long text, number, date, date-time, checkbox, picklist and multi-select picklist.
 - **The command bar** (top of every page) takes plain English:
   - *Questions* such as "Which patients have an order of protection?" become a read-only database lookup, and the results show as a table. They can never change data.
   - *Logging* such as "Add a note for Jordan: started sertraline 25 mg today", "New patient Maria Lopez, DOB 03/04/2012" or "Change Jordan's status to Discharged" comes back as a proposal to check and edit. **Nothing is saved until Save is clicked.**
-- **Drafting a history.** On a patient's page: Upload documents, then Build history. Each document is read once, and its facts are saved with exact quotes and page numbers. Later builds reuse them, so only new documents take time. Corrections made to facts are used in future drafts. The draft opens for review: every sentence cites its sources (`[D2 p.4]`), red boxes flag where documents disagree, and Export to Word saves a .docx.
+- **Uploading.** Drop files anywhere in MindChart, or click Upload documents (on Home, Documents or a patient's page). PDFs, Word files, photos (including iPhone HEIC) and faxes (including multi-page TIFFs) are accepted. Scanned and photographed pages are read with Apple's built-in OCR on the Mac, which also handles sideways and upside-down pages, scans with a stamp of real text on them, and pictures pasted into Word files. Pages it can't read well (messy handwriting, poor copies) are flagged "hard to read".
+- **Reviewing uploads.** Files wait in **Uploads** until they're checked. Each one gets a review card:
+  - **Type**, with how sure MindChart is (Sure, Likely or Unsure) and why.
+  - **Patient**, matched by name, date of birth and MRN against patients already in MindChart. A file about a child who isn't in MindChart yet offers a new patient, filled in from the document. A file dropped on one patient's page that names someone else (say, a sibling) gets a warning.
+  - **Date and author**, read from the document.
+  - **What to take from it**: facts for history drafts, and which of the type's details to fill in. The choice is remembered for that type.
+
+  Nothing is filed until Confirm is clicked. "Confirm all that are ready" files the ones MindChart is sure of, with no warnings. The AI reads each file's opening text in the background, so cards fill in within a minute or so.
+- **Learning document types.** Every confirmation (and every later correction of a document's type) is kept as an example in the encrypted store. New uploads are compared with those examples word by word, so documents like ones seen before, such as an agency's note template or a particular court's orders, are recognized straight away. The most similar examples are also shown to the AI. Before there are examples, built-in wording hints give a first guess. The AI model itself never changes, and nothing learned leaves the Mac.
+- **Background reading.** Confirmed documents are read in the background, one at a time: facts pulled out and the type's details filled in. The sidebar shows what's being read. It pauses while MindChart is locked and carries on after signing in. It doesn't count as activity, so MindChart still locks itself when left alone.
+- **Drafting a history.** On a patient's page, click Build history. Documents already read in the background are reused, so usually only the writing is left. Corrections made to facts are used in future drafts. The draft opens for review: every sentence cites its sources (`[D2 p.4]`), red boxes flag where documents disagree, pages that came from OCR are noted, and Export to Word saves a .docx.
 
 ## How it avoids made-up content
 
@@ -50,7 +62,7 @@ Running offline removes the biggest risk, which is sending records to a cloud AI
 - Store exported Word drafts and the original files only where the organization allows. Inside MindChart, everything is in the encrypted store.
 - Don't point AI coding assistants (which use the cloud) at real records. Develop with the fictional samples only.
 
-**Where the data is:** `~/Library/Application Support/MindChart/Patient Records.sparsebundle`, an AES-256 encrypted disk image built into macOS. Its password is never stored. Time Machine backs it up still encrypted. Every sign-in, view, edit (with old and new values), build, export and deletion is recorded under Activity, in a tamper-evident log that Settings can verify and export.
+**Where the data is:** `~/Library/Application Support/MindChart/Patient Records.sparsebundle`, an AES-256 encrypted disk image built into macOS. Its password is never stored. Uploads waiting for review and the examples MindChart learns from are kept there too, and an example is deleted along with its document. Time Machine backs it up still encrypted. Every sign-in, view, edit (with old and new values), build, export and deletion is recorded under Activity, in a tamper-evident log that Settings can verify and export.
 
 **Error log:** `~/Library/Logs/MindChart`. It records what failed and where, never record contents, so it's safe to send when reporting a problem.
 
@@ -85,7 +97,13 @@ macOS "Reduce motion" turns animations off. Other downloaded models can be picke
 scripts/test.sh
 ```
 
-56 automated tests cover document reading (including OCR), quote checking and citations, the drafting flow, record types and field types (including converting a field's type), AI-filled fields, the encrypted store, the audit trail, sign-in limits, password changes, data upgrades, the command bar, the server's security checks and the updater. They run on **Apple's built-in Python** (the one every Mac has), so code that only works with a newer Python can't slip through. They also run automatically on GitHub for every change. They don't need the AI model: stand-in answers take its place.
+90 automated tests cover:
+- document reading, including OCR of scans, photos, sideways pages and pictures in Word files
+- uploads, patient matching (including the wrong-sibling warning) and learning document types
+- background reading, quote checking and citations, and the drafting flow
+- record types and field types, including converting a field's type and adding new types
+- AI-filled fields, the encrypted store, the audit trail, sign-in limits and password changes
+- data upgrades, the command bar, the getting-started checklist, the server's security checks and the updater They run on **Apple's built-in Python** (the one every Mac has), so code that only works with a newer Python can't slip through. They also run automatically on GitHub for every change. They don't need the AI model: stand-in answers take its place.
 
 ## Updates
 
@@ -107,16 +125,19 @@ This runs the tests (and stops if any fail), builds the PDF reader and the Mac a
 | `vault.py` | Encrypted store, objects and fields, record IDs, tamper-evident activity log, data upgrades |
 | `models.py` | Which AI model suits this Mac, and downloading it |
 | `fields.py` | Record types and their fields, field types, and converting values when a type changes |
-| `history.py` | Fact extraction, quote checking, section drafting, Word export |
+| `history.py` | Identifying documents, fact extraction, quote checking, section drafting, Word export |
+| `intake.py` | Uploads: matching a file to a patient and suggesting its type, for the clinician to confirm |
+| `learning.py` | Recognizing document types from built-in hints and the clinician's confirmed examples |
+| `worker.py` | Background work: identifying uploads, then reading confirmed documents |
 | `assistant.py` | The command bar: questions and logging proposals |
-| `documents.py` | Reads PDF (with OCR for scans), Word, text and spreadsheet files |
-| `app.html`, `static/` | The app's page, styles and script |
+| `documents.py` | Reads PDF, image, Word, text and spreadsheet files (with OCR for scans, photos and pictures in Word files) |
+| `app.html`, `static/` | The app's page, styles and script (`static/tour.js`: the tour, help for each page, and the security explainer) |
 | `chat.html` | General chat with the local model |
 | `updater.py` | Self-updates from GitHub releases |
 | `install.sh` | One-line installer |
 | `tools/MindChartApp.swift` | The Mac app: its window, menus, file pickers and Save dialogs |
 | `tools/make_icon.swift` | Draws the app icon |
-| `tools/pdftext.swift` | PDF reader with OCR, using built-in macOS frameworks |
+| `tools/pdftext.swift` | PDF and image reader with OCR (any orientation), using built-in macOS frameworks |
 | `scripts/build_app.sh` | Builds MindChart.app |
 | `scripts/test.sh`, `tests/` | The automated tests |
 | `scripts/release.sh` | Publishes a new version (only if the tests pass) |

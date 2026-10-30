@@ -103,6 +103,19 @@ DEFAULT_RECORD_TYPES = {
     },
 }
 
+# What each document type is, for the AI that recognizes uploads. Types added later carry their own description.
+TYPE_DESCRIPTIONS = {
+    "Court Order": "an order, decision or petition from a court",
+    "Individualized Education Program (IEP)": "a school special education plan (classification, services, goals)",
+    "Psychological Evaluation": "a psychologist's testing report (IQ, achievement or personality tests)",
+    "Psychiatric Evaluation": "a psychiatrist's or nurse practitioner's diagnostic evaluation (often with history, "
+                              "mental status exam, diagnoses)",
+    "Discharge Summary": "a summary written when leaving a hospital or program",
+    "Progress or Clinical Note": "a medication management, therapy, nursing or progress note",
+    "Clinician Note": "a note written in MindChart itself",
+    "Other": "anything that doesn't fit another type",
+}
+
 YES = {"1", "true", "yes", "y", "on", "checked", "x"}
 
 

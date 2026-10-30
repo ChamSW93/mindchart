@@ -67,8 +67,9 @@ class Drafting(unittest.TestCase):
         history.ask = self.real_ask
 
     def fake_ask(self, model, thinking, system, user, schema, max_tokens, history=()):
-        if schema is history_module.DESCRIBE_SCHEMA:
-            return {"document_type": "Psychiatric Evaluation", "document_date": "09/18/2023", "author": "Dr. Test"}
+        if "document_type" in schema["properties"]:  # identifying the document
+            return {"document_type": "Psychiatric Evaluation", "document_date": "09/18/2023", "author": "Dr. Test",
+                    "patient_name": "Jordan Avery", "date_of_birth": "", "identifiers": []}
         if schema is history_module.EXTRACT_SCHEMA:
             return {"facts": [
                 {"section": "medications", "fact": "Takes guanfacine 1 mg.", "date": "", "quote": "guanfacine 1 mg at bedtime"},
@@ -97,6 +98,54 @@ class Drafting(unittest.TestCase):
 
 
 history_module = history
+
+
+class ReadingOneDocument(unittest.TestCase):
+    """Reading a single document, as background reading does: identifying it, and taking only what was asked for."""
+
+    def setUp(self):
+        self.real_ask, self.calls = history.ask, []
+        history.ask = self.fake_ask
+
+    def tearDown(self):
+        history.ask = self.real_ask
+
+    def fake_ask(self, model, thinking, system, user, schema, max_tokens, history=()):
+        self.calls.append((system, schema))
+        if "document_type" in schema["properties"]:
+            return {"document_type": "Safety Plan", "document_date": "", "author": "", "patient_name": "", "date_of_birth": "",
+                    "identifiers": []}
+        if "facts" in schema["properties"]:
+            return {"facts": [{"section": "risk", "fact": "Has a safety plan.", "date": "", "quote": "warning signs and coping"}] * 3}
+        return {"fields": []}
+
+    def doc(self):
+        return {"name": "plan.txt", "pages": [{"page": None, "text": "Safety plan: warning signs and coping strategies.", "scanned": False}]}
+
+    def test_types_added_in_the_app_and_confirmed_examples_reach_the_ai(self):
+        found = history.identify("m", False, "plan.txt", "Safety plan", {"Safety Plan": "a crisis plan", "Other": ""},
+                                 [{"document_type": "Safety Plan", "name": "a.txt", "text": "SAFETY PLAN Warning signs"}])
+        system, schema = self.calls[-1]
+        self.assertEqual(found["document_type"], "Safety Plan")
+        self.assertEqual(schema["properties"]["document_type"]["enum"], ["Safety Plan", "Other"])
+        self.assertIn("SAFETY PLAN Warning signs", system)
+
+    def test_only_what_was_asked_for_is_taken(self):
+        doc = {**self.doc(), "info": {"document_type": "Court Order", "document_date": "", "author": ""}}
+        definitions = {"Court Order": [d for d in fields.DEFAULT_RECORD_TYPES["documents"]["Court Order"]]}
+        updates = list(history.read_document(doc, "D1", "m", False, definitions, {"facts": False, "fields": ["judge"]}))
+        read = updates[-1]["document_read"]
+        self.assertIsNone(read["facts"])  # facts weren't asked for, so none were looked for
+        fill_system = self.calls[-1][0]
+        self.assertIn("judge", fill_system)
+        self.assertNotIn("docket_number", fill_system)
+
+    def test_the_ai_not_running_stops_reading_instead_of_saving_nothing(self):
+        def unavailable(*args, **kwargs):
+            raise history.AIUnavailable()
+        history.ask = unavailable
+        with self.assertRaises(history.AIUnavailable):
+            list(history.read_document(self.doc(), "D1", "m", False))
 
 
 class FillingFields(unittest.TestCase):

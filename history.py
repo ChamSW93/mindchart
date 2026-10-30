@@ -12,9 +12,12 @@ How it works, all on this computer:
 import io
 import json
 import re
+import urllib.error
 import urllib.request
 import zipfile
 from xml.sax.saxutils import escape
+
+import fields as fieldtypes
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 CONTEXT_LENGTH = 16384
@@ -61,10 +64,6 @@ SECTIONS = [
      "strengths, interests, hobbies, positive relationships, protective factors"),
 ]
 SECTION_TITLES = {key: title for key, title, _ in SECTIONS}
-DOCUMENT_TYPES = [
-    "Psychiatric Evaluation", "Psychological Evaluation", "Progress or Clinical Note",
-    "Individualized Education Program (IEP)", "Court Order", "Discharge Summary", "Other",
-]
 
 EXTRACT_PROMPT = """You help a psychiatric nurse practitioner gather the history for a child and adolescent psychiatric evaluation. You will be given an excerpt from one source record.
 
@@ -101,27 +100,40 @@ EXTRACT_SCHEMA = {
     "required": ["facts"],
 }
 
-DESCRIBE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "document_type": {"type": "string", "enum": DOCUMENT_TYPES},
-        "document_date": {"type": "string", "maxLength": 30},
-        "author": {"type": "string", "maxLength": 80},
-    },
-    "required": ["document_type", "document_date", "author"],
-}
-
-DESCRIBE_PROMPT = """Identify this clinical record from its file name and first page.
+IDENTIFY_PROMPT = """Identify this clinical record from its file name and opening text.
 - document_type: the closest type:
-  - Psychiatric Evaluation: a psychiatrist's or nurse practitioner's diagnostic evaluation (often with history, mental status exam, diagnoses)
-  - Psychological Evaluation: a psychologist's testing report (IQ, achievement or personality tests)
-  - Progress or Clinical Note: a medication management, therapy or progress note
-  - Individualized Education Program (IEP): a school special education plan (classification, services, goals)
-  - Court Order: an order, decision or petition from a court
-  - Discharge Summary: a summary written when leaving a hospital or program
+{types}
 - document_date: the date the document was written, exactly as written.
 - author: only the name and credentials of the clinician, judge or team who wrote it.
-Use an empty string for anything not stated."""
+- patient_name: the full name of the child or adolescent the record is about (not a parent, sibling, clinician or judge).
+- date_of_birth: that child's date of birth, exactly as written.
+- identifiers: record, case, docket, client or ID numbers for that child, exactly as written.
+Use an empty string (or an empty list) for anything not stated.{examples}"""
+
+
+def identify(model, thinking, name, text, types, examples=()):
+    """Work out a document's type, date, author and who it's about from its opening text.
+
+    types: {type: what it is}. examples: [{"document_type", "name", "text"}] the clinician confirmed before, which
+    help the model recognize documents like them. Returns the fields in IDENTIFY_PROMPT.
+    """
+    listed = "\n".join(f"  - {t}: {d}" if d else f"  - {t}" for t, d in types.items())
+    shown = "".join(f'\n- {e["document_type"]}: "{" ".join(e["text"].split())[:300]}"' for e in examples)
+    if shown:
+        shown = "\n\nThe clinician has confirmed these documents' types before; use them to recognize similar ones:" + shown
+    schema = {"type": "object", "properties": {
+        "document_type": {"type": "string", "enum": list(types)},
+        "document_date": {"type": "string", "maxLength": 30},
+        "author": {"type": "string", "maxLength": 80},
+        "patient_name": {"type": "string", "maxLength": 80},
+        "date_of_birth": {"type": "string", "maxLength": 30},
+        "identifiers": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 40}},
+    }, "required": ["document_type", "document_date", "author", "patient_name", "date_of_birth", "identifiers"]}
+    return ask(model, thinking, IDENTIFY_PROMPT.format(types=listed, examples=shown),
+               f"File name: {name}\n\n{text[:4000]}", schema, max_tokens=1000)
+
+
+DEFAULT_TYPES = {t: d for t, d in fieldtypes.TYPE_DESCRIPTIONS.items() if t != "Clinician Note"}
 
 WRITE_PROMPT = """You help a psychiatric nurse practitioner draft the history for a child and adolescent psychiatric evaluation.
 
@@ -166,6 +178,13 @@ class TooLong(Exception):
     """The model hit its output limit before finishing its answer."""
 
 
+class AIUnavailable(Exception):
+    """The local AI (Ollama) isn't running, so nothing can be read right now."""
+
+    def __init__(self):
+        super().__init__("The AI isn't running. Open Ollama and try again.")
+
+
 class BadReply(Exception):
     """The model answered, but not in the requested JSON format. The reply text is kept in .text."""
 
@@ -195,8 +214,13 @@ def ask(model, thinking, system, user, schema, max_tokens, history=()):
         request["think"] = "low" if model.startswith("gpt-oss") else False
     req = urllib.request.Request(OLLAMA_URL, data=json.dumps(request).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=900) as response:
-        reply = json.load(response)
+    try:
+        with urllib.request.urlopen(req, timeout=900) as response:
+            reply = json.load(response)
+    except urllib.error.URLError as error:
+        if isinstance(error.reason, ConnectionRefusedError):
+            raise AIUnavailable() from error
+        raise
     if reply.get("done_reason") == "length":
         raise TooLong()
     content = reply["message"]["content"]
@@ -241,7 +265,6 @@ Fields:
 def fill_fields(model, thinking, doc, definitions):
     """Fill in a document's record-type fields. Each value must come with a quote that's really in the document;
     values without one, or that don't fit the field's type, are left out. Returns {name: {value, quote, page}}."""
-    import fields as fieldtypes  # here, so history.py doesn't need the field definitions otherwise
     described = "\n".join(
         f"- {d['name']}: {d['label']} ({d['type']}{': ' + ', '.join(d['options']) if d['options'] else ''})" for d in definitions)
     schema = {"type": "object", "properties": {"fields": {"type": "array", "items": {
@@ -349,7 +372,74 @@ def cite(fact, documents):
     return f"D{fact['doc'] + 1}{page}"
 
 
-def build(documents, model, thinking, document_fields=None):
+def prepare(doc):
+    """Split a document into parts and index its pages for quote checking (once)."""
+    if "chunks" not in doc:
+        doc["chunks"] = chunk_pages(doc["pages"])
+        for p in doc["pages"]:
+            p["normalized"] = normalize(p["text"])
+            p["trigrams"] = trigrams(p["normalized"].split())
+
+
+def read_document(doc, label, model, thinking, document_fields=None, pull=None, types=None):
+    """Read one document: identify it if its type isn't known yet, pull out its facts, and fill in its type's fields.
+
+    Yields {"progress": text, "done": parts finished} as it goes, warnings, and finally
+    {"document_read": {"info", "facts", "filled"}}. The parts are identifying (1) and each chunk.
+    pull: what to take, {"facts": bool, "fields": [names], or None for all}. When facts aren't taken, "facts" is None.
+    """
+    prepare(doc)
+    pull = pull or {"facts": True, "fields": None}
+    done = 0
+    if doc.get("info"):  # already known: confirmed when uploaded, typed into MindChart, or corrected by hand
+        info = doc["info"]
+    else:
+        yield {"progress": f"Identifying {label}", "done": done}
+        try:
+            found = identify(model, thinking, doc["name"], doc["chunks"][0], types or DEFAULT_TYPES)
+            info = {key: found.get(key, "") for key in ("document_type", "document_date", "author")}
+        except AIUnavailable:
+            raise
+        except Exception:
+            info = {"document_type": "Other", "document_date": "", "author": ""}
+    doc.update(info)
+    doc["info"] = info
+    done += 1
+
+    facts = None
+    if pull.get("facts", True):
+        facts = []
+        for c_index, chunk in enumerate(doc["chunks"]):
+            yield {"progress": f"Reading {label}, part {c_index + 1} of {len(doc['chunks'])}", "done": done}
+            try:
+                found = extract_facts(model, thinking, doc, chunk)
+            except AIUnavailable:
+                raise
+            except Exception as error:
+                yield {"warning": f"Couldn't read part {c_index + 1} of {label}: {error}"}
+                found = []
+            for f in found:
+                if not f.get("fact", "").strip():
+                    continue
+                verified, page = locate(f.get("quote", ""), doc["pages"])
+                facts.append({**f, "page": page, "verified": verified})
+            done += 1
+
+    wanted = [d for d in (document_fields or {}).get(doc["document_type"]) or []
+              if pull.get("fields") is None or d["name"] in pull["fields"]]
+    filled = {}
+    if wanted:
+        yield {"progress": f"Filling in {doc['document_type']} details for {label}", "done": done}
+        try:
+            filled = fill_fields(model, thinking, doc, wanted)
+        except AIUnavailable:
+            raise
+        except Exception as error:
+            yield {"warning": f"Couldn't fill in the details for {label}: {error}"}
+    yield {"document_read": {"info": info, "facts": facts, "filled": filled}}
+
+
+def build(documents, model, thinking, document_fields=None, types=None):
     """Run the whole process, yielding progress updates and finally the result.
 
     documents: [{"name": "file.pdf", "pages": [{"page", "text", "scanned"}, ...]}, ...]
@@ -357,12 +447,10 @@ def build(documents, model, thinking, document_fields=None):
     read again. Each newly read document is reported as {"document_read": ...} so it
     can be saved for next time.
     document_fields: {record type: [field definitions the AI fills in]}; filled values come back in "document_read".
+    types: {document type: what it is}, for identifying documents whose type isn't known.
     """
     for doc in documents:
-        doc["chunks"] = chunk_pages(doc["pages"])
-        for p in doc["pages"]:
-            p["normalized"] = normalize(p["text"])
-            p["trigrams"] = trigrams(p["normalized"].split())
+        prepare(doc)
     total = sum(len(d["chunks"]) + 1 for d in documents if "facts" not in d) + len(SECTIONS)
     step = 0
     facts = []
@@ -373,43 +461,16 @@ def build(documents, model, thinking, document_fields=None):
             doc.update(doc.get("info") or {"document_type": "Other", "document_date": "", "author": ""})
             facts.extend({**f, "id": len(facts) + i, "doc": d_index} for i, f in enumerate(doc["facts"]))
             continue
-        doc_facts = []
-        if doc.get("info"):  # already known, e.g. a note typed into MindChart or a type corrected by hand
-            info = doc["info"]
-        else:
-            yield {"progress": f"Identifying {label}", "step": step, "total": total}
-            try:
-                info = ask(model, thinking, DESCRIBE_PROMPT, f"File name: {doc['name']}\n\n{doc['chunks'][0][:4000]}",
-                           DESCRIBE_SCHEMA, max_tokens=800)
-            except Exception:
-                info = {"document_type": "Other", "document_date": "", "author": ""}
-        doc.update(info)
-        doc["info"] = info
-        step += 1
-
-        for c_index, chunk in enumerate(doc["chunks"]):
-            yield {"progress": f"Reading {label}, part {c_index + 1} of {len(doc['chunks'])}", "step": step, "total": total}
-            try:
-                found = extract_facts(model, thinking, doc, chunk)
-            except Exception as error:
-                yield {"warning": f"Couldn't read part {c_index + 1} of {label}: {error}"}
-                found = []
-            for f in found:
-                if not f.get("fact", "").strip():
-                    continue
-                verified, page = locate(f.get("quote", ""), doc["pages"])
-                doc_facts.append({**f, "page": page, "verified": verified})
-            step += 1
-        facts.extend({**f, "id": len(facts) + i, "doc": d_index} for i, f in enumerate(doc_facts))
-        filled = {}
-        definitions = (document_fields or {}).get(doc["document_type"]) or []
-        if definitions:
-            yield {"progress": f"Filling in {doc['document_type']} details for {label}", "step": step, "total": total}
-            try:
-                filled = fill_fields(model, thinking, doc, definitions)
-            except Exception as error:
-                yield {"warning": f"Couldn't fill in the details for {label}: {error}"}
-        yield {"document_read": {"index": d_index, "info": info, "facts": doc_facts, "filled": filled}}
+        for update in read_document(doc, label, model, thinking, document_fields, doc.get("pull"), types):
+            if "document_read" in update:
+                read = update["document_read"]
+                facts.extend({**f, "id": len(facts) + i, "doc": d_index} for i, f in enumerate(read["facts"] or []))
+                yield {"document_read": {"index": d_index, **read}}
+            elif "progress" in update:
+                yield {"progress": update["progress"], "step": step + update["done"], "total": total}
+            else:
+                yield update
+        step += len(doc["chunks"]) + 1
 
     sections = []
     for key, title, _ in SECTIONS:
@@ -447,7 +508,8 @@ def build(documents, model, thinking, document_fields=None):
         "documents": [
             {"label": f"D{i + 1}", "name": d["name"], "type": d["document_type"], "date": d["document_date"],
              "author": d["author"], "pages": len(d["pages"]) if d["pages"][0]["page"] else None,
-             "scanned_pages": [p["page"] for p in d["pages"] if p["scanned"]]}
+             "scanned_pages": [p["page"] for p in d["pages"] if p["scanned"]],
+             "unclear_pages": [p["page"] for p in d["pages"] if p.get("unclear")]}
             for i, d in enumerate(documents)
         ],
     }, "step": total, "total": total}

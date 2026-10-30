@@ -107,6 +107,88 @@ class RecordTypes(unittest.TestCase):
         self.vault.change_field_type("patients", "Residential treatment", "cottage", "text")  # back, for other tests
 
 
+class Uploads(unittest.TestCase):
+    """The uploads inbox: files wait for review, then are filed under a patient and read in the background."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.vault = support.unlocked_vault()
+
+    def upload(self, text="ORDERED that the child is placed. Family Court.", name="order.pdf", target=None):
+        pages = [{"page": 1, "text": text, "scanned": True, "unclear": False}]
+        return self.vault.add_upload(name, b"%PDF", pages, target, {"document_type": "Court Order"})
+
+    def test_confirming_files_it_learns_and_queues_reading(self):
+        patient = self.vault.create_record("patients", {"name": "Inbox Test (fictional)"})
+        uid = self.upload()
+        listed = next(u for u in self.vault.list_uploads() if u["id"] == uid)
+        self.assertEqual(listed["scanned_pages"], [1])
+        doc, _ = self.vault.confirm_upload(uid, {"patient_id": patient, "document_type": "Court Order",
+                                                 "pull": {"facts": True, "fields": ["judge", "court"]}})
+        self.assertFalse(any(u["id"] == uid for u in self.vault.list_uploads()))
+        self.assertEqual(self.vault.get_record("documents", doc)["record"]["read_state"], "queued")
+        self.assertIn({"document_type": "Court Order", "name": "order.pdf", "text": "ORDERED that the child is placed. Family Court."},
+                      self.vault.type_examples())
+        self.assertEqual(self.vault.pull_preferences()["Court Order"], {"facts": True, "fields": ["judge", "court"]})
+        queued = self.vault.next_document_to_read()
+        while queued["uid"] != doc:  # documents other tests queued first
+            self.vault.save_document_facts(queued["id"], queued["info"], [], "test-model")
+            queued = self.vault.next_document_to_read()
+        self.assertEqual(queued["info"]["document_type"], "Court Order")
+        self.vault.save_document_facts(queued["id"], queued["info"], [], "test-model")
+        self.assertEqual(self.vault.get_record("documents", doc)["record"]["read_state"], "read")
+
+    def test_a_new_patient_can_be_made_from_a_file(self):
+        doc, patient = self.vault.confirm_upload(self.upload(), {"new_patient": {"name": "Casey New (fictional)", "dob": "07/22/2010"},
+                                                                 "document_type": "Court Order"})
+        self.assertEqual(self.vault.get_record("patients", patient)["record"]["dob"], "07/22/2010")
+        self.assertEqual(self.vault.get_record("documents", doc)["record"]["patient_id"], patient)
+
+    def test_type_and_patient_are_required(self):
+        uid = self.upload()
+        with self.assertRaisesRegex(ValueError, "type"):
+            self.vault.confirm_upload(uid, {"document_type": "Not a type"})
+        with self.assertRaisesRegex(ValueError, "patient"):
+            self.vault.confirm_upload(uid, {"document_type": "Court Order"})
+        self.vault.discard_upload(uid)
+        with self.assertRaises(ValueError):
+            self.vault.get_upload(uid)
+
+    def test_correcting_a_type_teaches_it_and_refills_details(self):
+        patient = self.vault.create_record("patients", {"name": "Correction Test (fictional)"})
+        doc, _ = self.vault.confirm_upload(self.upload(name="iep.pdf"), {"patient_id": patient, "document_type": "Court Order"})
+        row_id = self.vault.internal("documents", doc)
+        self.vault.save_document_facts(row_id, {"document_type": "Court Order"}, [], "test-model")
+        self.vault.update_record("documents", doc, {"document_type": "Individualized Education Program (IEP)"})
+        self.assertIn("Individualized Education Program (IEP)",
+                      [e["document_type"] for e in self.vault.type_examples() if e["name"] == "iep.pdf"])
+        self.assertEqual(self.vault.get_record("documents", doc)["record"]["read_state"], "fields")
+        self.vault.delete_record("documents", doc)  # its example goes with it
+        self.assertNotIn("iep.pdf", [e["name"] for e in self.vault.type_examples()])
+
+    def test_types_can_be_added(self):
+        self.vault.add_record_type("documents", "Safety Plan (test)", "A written plan for staying safe")
+        self.assertIn("Safety Plan (test)", self.vault.describe_objects()["documents"]["record_types"])
+        self.assertEqual(self.vault.record_type_descriptions("documents")["Safety Plan (test)"], "A written plan for staying safe")
+        with self.assertRaisesRegex(ValueError, "already"):
+            self.vault.add_record_type("documents", "safety plan (TEST)")
+        patient = self.vault.create_record("patients", {"name": "Type Test (fictional)"})
+        doc, _ = self.vault.confirm_upload(self.upload(), {"patient_id": patient, "document_type": "Safety Plan (test)"})
+        self.assertEqual(self.vault.get_record("documents", doc)["record"]["document_type"], "Safety Plan (test)")
+
+
+class GettingStarted(unittest.TestCase):
+    def test_the_checklist_ticks_off_features_as_they_are_tried(self):
+        vault = support.unlocked_vault()
+        patient = vault.create_record("patients", {"name": "Checklist Test (fictional)"})
+        vault.add_note(patient, "First note.")
+        steps = vault.onboarding()["steps"]
+        self.assertTrue(steps["patient"] and steps["note"])
+        vault.set_setting("checklist", "hidden")
+        self.assertTrue(vault.onboarding()["hidden"])
+        vault.set_setting("checklist", "")
+
+
 class AuditTrail(unittest.TestCase):
     def test_tampering_is_detected(self):
         vault = support.unlocked_vault()
@@ -185,6 +267,33 @@ class Upgrades(unittest.TestCase):
             self.assertEqual(json.loads(placed["custom"]), {"cottage": "Cottage 4", "admission_date": "01/02/2026"})
             self.assertTrue(db.execute("SELECT COUNT(*) FROM field_defs").fetchone()[0])
             self.assertTrue(list((Path(folder) / "backups").glob("records-*.db")))
+
+    def test_version_3_documents_get_background_reading(self):
+        vault = support.vault
+        with tempfile.TemporaryDirectory() as folder:
+            db = sqlite3.connect(Path(folder) / "records.db")
+            db.row_factory = sqlite3.Row
+            db.executescript("""
+                CREATE TABLE patients (id INTEGER PRIMARY KEY, uid TEXT UNIQUE NOT NULL, name TEXT, dob TEXT, gender TEXT, mrn TEXT,
+                    record_type TEXT, status TEXT, guardian TEXT, notes TEXT, created TEXT, custom TEXT);
+                CREATE TABLE documents (id INTEGER PRIMARY KEY, uid TEXT UNIQUE NOT NULL, patient_id INTEGER REFERENCES patients(id),
+                    name TEXT, kind TEXT, document_type TEXT, document_date TEXT, author TEXT, added TEXT, read_by_model TEXT,
+                    original BLOB, pages TEXT, read_at TEXT, custom TEXT);
+                INSERT INTO patients (uid, name) VALUES ('PT-AAAAAA', 'Old Patient');
+                INSERT INTO documents (uid, patient_id, name, read_by_model) VALUES ('DOC-AAAAAA', 1, 'read.pdf', 'gpt-oss:20b');
+                INSERT INTO documents (uid, patient_id, name) VALUES ('DOC-BBBBBB', 1, 'unread.pdf');
+                PRAGMA user_version = 3;""")
+            original_mount = vault.MOUNT
+            vault.MOUNT = Path(folder)
+            try:
+                vault.prepare_database(db)
+            finally:
+                vault.MOUNT = original_mount
+            self.assertEqual({r["name"]: r["read_state"] for r in db.execute("SELECT name, read_state FROM documents")},
+                             {"read.pdf": "read", "unread.pdf": None})
+            types = [r[0] for r in db.execute("SELECT name FROM record_types WHERE object = 'documents'")]
+            self.assertIn("Court Order", types)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM uploads").fetchone()[0], 0)
 
     def test_newer_data_is_refused(self):
         vault = support.vault

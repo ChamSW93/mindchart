@@ -16,7 +16,7 @@
   body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 "Avenir Next", Avenir, -apple-system, system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
   header { padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   header h1 { font: 600 20px/1.1 var(--serif); margin: 0; display: flex; align-items: center; gap: 10px; }
-  header h1 svg { width: 30px; height: 30px; border-radius: 50%; box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--mustard); }
+  header h1 img { width: 30px; height: 30px; }
   header a { margin-left: auto; color: var(--accent); font-size: 14px; text-decoration: none; font-weight: 500; }
   header label { color: var(--muted); font-weight: 400; font-size: 14px; display: flex; align-items: center; gap: 6px; }
   select { font: inherit; font-size: 14px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); max-width: 100%; }
@@ -44,8 +44,7 @@
 </head>
 <body>
 <header>
-  <h1><svg viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="17" fill="var(--accent)"/>
-    <path d="M7 18h5l2.5-6 4 11 3-8 1.5 3H27" fill="none" stroke="var(--on-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Chat</h1>
+  <h1><img src="/static/logo.svg" alt="">Chat</h1>
   <label>Model <select id="model"><option>Loading…</option></select></label>
   <a href="/">← Back to {{APP_NAME}}</a>
 </header>

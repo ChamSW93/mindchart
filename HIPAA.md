@@ -11,7 +11,7 @@ A Mac app that keeps child and adolescent psychiatric records (patients, source 
 **Where patient data goes:**
 
 ```
-Source files (PDF/Word) ──▶ MindChart on this Mac ──▶ Encrypted store on this Mac
+Source files (PDF/Word/photos) ──▶ MindChart on this Mac ──▶ Encrypted store on this Mac
                               │   AI model (Ollama) on this Mac, localhost only
                               └─▶ Word export: only when the clinician chooses (unencrypted file, logged)
 Nothing is sent over the internet. Updates download code only, and never upload anything.
@@ -25,7 +25,7 @@ Nothing is sent over the internet. Updates download code only, and never upload 
 | **Emergency access procedure** §164.312(a)(2)(ii), required | Records open only with the MindChart password, which isn't stored anywhere and can't be recovered by anyone. The password can be changed in Settings. **The organization must keep the password in a controlled place** (see below) so records stay reachable if the clinician is unavailable. | Password change tested, including a wrong current password |
 | **Automatic logoff** §164.312(a)(2)(iii) | Locks after 15 minutes without activity, when Lock is clicked, when the app quits, and if the app crashes (its server notices and locks). Locking removes records from the screen. | Tested: normal quit, forced quit (crash), idle lock |
 | **Encryption and decryption** §164.312(a)(2)(iv) | All records are kept in an **AES-256 encrypted disk image** (built into macOS) that only the password opens. MindChart also warns if the Mac's own disk encryption (FileVault) is off. | Raw files searched for record text while locked: none found |
-| **Audit controls** §164.312(b), required | An activity log records sign-ins (including failed attempts), opening patients and drafts, adding, editing and deleting records, building drafts, questions asked, and **every export**. Entries can't be edited or deleted in the app, and they're kept when a patient is deleted. The log can be exported as CSV. | Automated tests |
+| **Audit controls** §164.312(b), required | An activity log records sign-ins (including failed attempts), uploads (and discarded ones), filing a document under a patient, opening patients and drafts, adding, editing and deleting records, building drafts, questions asked, and **every export**. Entries can't be edited or deleted in the app, and they're kept when a patient is deleted. The log can be exported as CSV. | Automated tests |
 | **Integrity** §164.312(c)(1) | Edits record the **old and new value** of each field. The activity log is **tamper-evident**: each entry carries a SHA-256 fingerprint chained to the entry before, and Settings rechecks the whole chain. Data upgrades back up the database first and run as all-or-nothing transactions. | Tested: altering one old entry is detected; a failed upgrade leaves data unchanged |
 | **Person or entity authentication** §164.312(d), required | A password of at least 10 characters opens the records. After 5 wrong attempts, each further attempt waits 30 seconds, doubling up to 15 minutes. | Automated test |
 | **Transmission security** §164.312(e)(1) | Nothing is transmitted: the app, its local server and the AI model all run on the Mac. The server listens only to the Mac itself, refuses requests from other web pages (host, origin and request-header checks, including DNS-rebinding protection), and refuses uploads over 200 MB. | Automated tests. Logs searched after processing records: no record contents found. Ollama confirmed listening on localhost only |
@@ -33,11 +33,14 @@ Nothing is sent over the internet. Updates download code only, and never upload 
 ## Further protections
 
 - **Its own window, not a web browser.** Browser extensions can read and transmit anything on a web page. MindChart runs in its own app window, so extensions never see patient data.
-- **The AI can't change records on its own.** Plain-English questions run as read-only database queries. Requests to add or change records come back as a proposal the clinician reviews and saves.
+- **The AI can't change records on its own.** Plain-English questions run as read-only database queries. Requests to add or change records come back as a proposal the clinician reviews and saves. Uploaded files are filed under a patient only after the clinician confirms the patient and the document type.
+- **Wrong-patient checks.** Each upload is matched to patients by name, date of birth and MRN. A file dropped on one patient's page that names a different child (a sibling, say) gets a warning before it can be filed.
+- **Uploads and learning stay in the encrypted store.** Files waiting for review are kept inside the encrypted store, and a discarded upload is wiped from it. The examples MindChart learns document types from (each confirmed document's type and opening text) are kept there too, are deleted along with their document, and never leave the Mac.
+- **Background reading doesn't keep records open.** Reading confirmed documents in the background doesn't count as activity, so MindChart still locks itself after 15 minutes alone. Reading pauses while locked.
 - **Error logs contain no record contents.** `~/Library/Logs/MindChart` records what failed and where in the code, so it's safe to send to the developer.
 - **Updates are code-only and verified.** Updates download from GitHub over HTTPS, are checked against a published SHA-256 checksum, replace only the app's files, and never touch the encrypted store. They never upload anything.
 - **Deleting is thorough.** Deleting a patient removes their documents, facts and drafts, and the database is rewritten so deleted records don't linger in free space.
-- **Tested before every release.** An automated test suite (56 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
+- **Tested before every release.** An automated test suite (90 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
 
 ## What the organization is responsible for
 

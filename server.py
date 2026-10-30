@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -26,9 +27,11 @@ from pathlib import Path
 import assistant
 import documents
 import history
+import intake
 import models
 import updater
 import vault
+import worker
 
 APP_NAME = "MindChart"  # the name shown in the app; change it here to rename the app
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -115,11 +118,23 @@ def default_model(available):
 def model_choice(payload):
     """The model the page asked for, and whether it can think (reason before answering)."""
     name = payload.get("model") or default_model(list_models())
+    return name, can_think(name)
+
+
+def background_model():
+    """The model picked in the app (remembered in settings), for work done in the background."""
     try:
-        thinking = next((m["thinking"] for m in list_models() if m["name"] == name), False)
+        name = vault.get_setting("model") or default_model(list_models())
+    except urllib.error.URLError:
+        raise history.AIUnavailable()
+    return name, can_think(name)
+
+
+def can_think(name):
+    try:
+        return next((m["thinking"] for m in list_models() if m["name"] == name), False)
     except Exception:
-        thinking = False
-    return name, thinking
+        return False
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -195,10 +210,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_json(403, {"error": "Requests are only accepted from MindChart itself"})
         parts = url.path.strip("/").split("/")[1:]  # /api/records/patients/PT-123 -> ["records", "patients", "PT-123"]
         query = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
-        if parts[:1] != ["session"]:
+        if parts[:1] not in (["session"], ["work"]):  # the page checks these by itself, so they aren't activity
             vault.touch()  # any use of the app postpones the automatic lock
         try:
-            is_upload = parts[-1:] == ["documents"] or parts == ["extract"]  # these bodies are files, not JSON
+            is_upload = parts in (["uploads"], ["extract"])  # these bodies are files, not JSON
             data = json.loads(body) if body and not is_upload else {}
             result = self.route(method, parts, query, data, body)
             if result is not None:
@@ -255,6 +270,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             vault.set_setting("user_name", data["name"].strip())
             vault.log("changed the user name")
             return {}
+        if is_("POST", "settings", "tour"):  # "done" or "skipped"; empty shows the tour again
+            vault.set_setting("tour", str(data.get("state", "")))
+            return {}
+        if is_("POST", "settings", "checklist"):  # "hidden" or empty
+            vault.set_setting("checklist", str(data.get("state", "")))
+            return {}
+        if is_("GET", "onboarding"):
+            return {**vault.onboarding(), "tour": vault.get_setting("tour")}
+        if is_("POST", "settings", "model"):  # so background work uses the model picked in the app
+            vault.set_setting("model", str(data.get("model", "")))
+            return {}
         if is_("POST", "settings", "password"):
             vault.change_password(data.get("current", ""), data.get("new", ""))
             return {}
@@ -276,9 +302,24 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if is_("POST", "records", "*", "*", "delete"):
             vault.delete_record(*args)
             return {}
-        if is_("POST", "patients", "*", "documents"):
-            name = query.get("name", "document")
-            return {"id": vault.add_document(args[0], name, body, documents.read_pages(name, body))}
+        if is_("POST", "record-types"):
+            return {"name": vault.add_record_type(data.get("object", ""), data.get("name", ""), data.get("description", ""))}
+        if is_("POST", "uploads"):  # a file to review; it's read now (with OCR if needed) and identified in the background
+            name, target = query.get("name", "document"), query.get("patient") or None
+            pages = documents.read_pages(name, body)
+            suggestion, _ = intake.suggest(name, pages, target)
+            return {"id": vault.add_upload(name, body, pages, target, suggestion)}
+        if is_("GET", "uploads"):
+            return {"uploads": [intake.refresh(u) for u in vault.list_uploads()], "pull_preferences": vault.pull_preferences(),
+                    "patients": vault.patients_for_matching()}
+        if is_("POST", "uploads", "*", "confirm"):
+            document_id, patient_id = vault.confirm_upload(args[0], data)
+            return {"document_id": document_id, "patient_id": patient_id}
+        if is_("POST", "uploads", "*", "discard"):
+            vault.discard_upload(args[0])
+            return {}
+        if is_("GET", "work"):
+            return worker.status()
         if is_("POST", "patients", "*", "notes"):
             return {"id": vault.add_note(args[0], data.get("text", ""), data.get("date", ""), data.get("author", ""))}
         if is_("POST", "patients", "*", "history"):
@@ -312,17 +353,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         vault.log("built a history", vault.internal("patients", patient_uid), model)
         self.start_stream()
         try:
-            for update in history.build(docs, model, thinking, vault.document_field_definitions()):
-                vault.touch()  # a long build counts as activity, so MindChart stays unlocked
-                if "document_read" in update:
-                    read = update["document_read"]
-                    vault.save_document_facts(docs[read["index"]]["id"], read["info"], read["facts"], model, read.get("filled"))
-                    continue
-                if "result" in update:
-                    update["draft_id"] = vault.save_draft(patient_uid, model, update["result"])
-                self.stream_line(update)
+            if worker.STATUS["current"]:
+                self.stream_line({"progress": "Waiting for background reading to finish its current step", "step": 0, "total": 1})
+            with worker.paused():
+                self.stream_history(patient_uid, docs, model, thinking, data.get("reread"))
         except Exception as error:
             self.stream_line({"error": str(error)})
+
+    def stream_history(self, patient_uid, docs, model, thinking, reread):
+        if not reread:  # documents read in the background while this waited are picked up, not read twice
+            read_now = {d["uid"]: d for d in vault.documents_for_history(patient_uid, [d["uid"] for d in docs], False)}
+            docs = [read_now[d["uid"]] if "facts" in read_now.get(d["uid"], {}) and "facts" not in d else d for d in docs]
+        for update in history.build(docs, model, thinking, vault.document_field_definitions(), intake.document_types()):
+            vault.touch()  # a long build counts as activity, so MindChart stays unlocked
+            if "document_read" in update:
+                read = update["document_read"]
+                vault.save_document_facts(docs[read["index"]]["id"], read["info"], read["facts"], model, read.get("filled"))
+                continue
+            if "result" in update:
+                update["draft_id"] = vault.save_draft(patient_uid, model, update["result"])
+            self.stream_line(update)
 
     def chat(self, payload):
         """Forward a chat to Ollama and stream the reply back, one JSON line per chunk."""
@@ -364,6 +414,7 @@ if __name__ == "__main__":
     threading.Thread(target=vault.auto_lock_forever, daemon=True).start()
     threading.Thread(target=check_for_updates_forever, daemon=True).start()
     threading.Thread(target=download_recommended_model, daemon=True).start()
+    threading.Thread(target=worker.run_forever, args=(background_model,), daemon=True).start()
     if os.environ.get("MINDCHART_APP"):
         threading.Thread(target=stop_when_app_quits, daemon=True).start()
     # Closing the Terminal window sends SIGHUP; exiting cleanly lets the data lock on the way out.

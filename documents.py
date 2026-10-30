@@ -16,8 +16,11 @@ from pathlib import Path
 HERE = Path(__file__).parent
 PDFTEXT = HERE / "tools" / "pdftext"
 TEXTUTIL_TYPES = {".docx", ".doc", ".rtf", ".odt", ".html", ".htm", ".webarchive"}
+# Photos, scans and faxes, read with the built-in OCR. TIFFs from fax systems can hold several pages.
+IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".heic", ".heif", ".tif", ".tiff", ".gif", ".bmp"}
 MAX_CHAT_FILE_CHARS = 40000  # about 10,000 tokens, leaving room for the conversation
-PAGE_MARKER = re.compile(r"^=== Page (\d+)( \(scanned\))? ===$", re.M)
+PAGE_MARKER = re.compile(r"^=== Page (\d+)( \(scanned(, unclear)?\))? ===$", re.M)
+MIN_PICTURE_BYTES = 15000  # pictures in Word files smaller than this are logos and lines, not scanned pages
 SPREADSHEET_NS = {
     "m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
@@ -27,25 +30,26 @@ BUILTIN_DATE_FORMATS = set(range(14, 23)) | set(range(45, 48))
 
 
 def read_pages(name, data):
-    """Read a file into pages: [{"page": 1, "text": "...", "scanned": False}, ...].
+    """Read a file into pages: [{"page": 1, "text": "...", "scanned": False, "unclear": False}, ...].
 
-    PDFs keep their real page numbers so the history can cite them. Word and other
-    files have no fixed pages, so they come back as a single page with "page": None.
+    PDFs and images keep their page numbers so the history can cite them. Pages read with OCR are
+    "scanned", and ones the OCR was unsure of (handwriting, poor copies) are also "unclear". Word and
+    other files have no fixed pages, so they come back as a single page with "page": None.
     """
     suffix = Path(name).suffix.lower()
-    if suffix == ".pdf":
-        output = run_on_temp_file(name, data, suffix, lambda path: [str(pdftext()), path])
-        parts = PAGE_MARKER.split(output)
-        # split() gives: [before, number, scanned, text, number, scanned, text, ...]
-        pages = [
-            {"page": int(parts[i]), "text": parts[i + 2].strip(), "scanned": bool(parts[i + 1])}
-            for i in range(1, len(parts), 3)
-        ]
+    if suffix == ".pdf" or suffix in IMAGE_TYPES:
+        pages = parse_pages(run_on_temp_file(name, data, suffix, lambda path: [str(pdftext()), path]))
         if not any(p["text"] for p in pages):
             raise ValueError(f"No text found in {name}, even after trying to read it as a scan")
         return pages
+    scanned = False
     if suffix in TEXTUTIL_TYPES:  # Word, RTF, etc. via macOS's built-in textutil
         text = run_on_temp_file(name, data, suffix, lambda path: ["textutil", "-convert", "txt", "-stdout", path])
+        if suffix == ".docx":  # scanned pages pasted into Word arrive as pictures, so read those too
+            pictures = text_in_pictures(data)
+            if pictures.strip():
+                text = f"{text.strip()}\n\n[Text read from pictures in the document]\n{pictures.strip()}"
+                scanned = True
     elif suffix in (".xlsx", ".xlsm"):
         try:
             text = xlsx_to_text(data)
@@ -62,7 +66,31 @@ def read_pages(name, data):
             text = data.decode("cp1252", errors="replace")  # older Excel CSV exports on Windows
     if not text.strip():
         raise ValueError(f"No text found in {name}")
-    return [{"page": None, "text": text.strip(), "scanned": False}]
+    return [{"page": None, "text": text.strip(), "scanned": scanned, "unclear": False}]
+
+
+def parse_pages(output):
+    """The reader's output, split at its page markers."""
+    parts = PAGE_MARKER.split(output)
+    # split() gives: [before, number, scanned, unclear, text, number, scanned, unclear, text, ...]
+    return [{"page": int(parts[i]), "text": parts[i + 3].strip(), "scanned": bool(parts[i + 1]), "unclear": bool(parts[i + 2])}
+            for i in range(1, len(parts), 4)]
+
+
+def text_in_pictures(data):
+    """OCR the larger pictures inside a Word (.docx) file, in the order they're stored."""
+    texts = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            pictures = [i for i in z.infolist() if i.filename.startswith("word/media/")
+                        and Path(i.filename).suffix.lower() in IMAGE_TYPES and i.file_size >= MIN_PICTURE_BYTES]
+            for item in sorted(pictures, key=lambda i: i.filename):
+                output = run_on_temp_file(item.filename, z.read(item), Path(item.filename).suffix.lower(),
+                                          lambda path: [str(pdftext()), path])
+                texts += [p["text"] for p in parse_pages(output) if p["text"]]
+    except (zipfile.BadZipFile, ValueError):
+        return ""
+    return "\n\n".join(texts)
 
 
 def extract_text(name, data):
@@ -78,7 +106,7 @@ def extract_text(name, data):
 
 
 def pdftext():
-    """The PDF reader in tools/, built from its Swift source the first time it's needed."""
+    """The PDF and image reader in tools/, built from its Swift source the first time it's needed."""
     if not PDFTEXT.exists():
         subprocess.run(["swiftc", "-O", str(PDFTEXT) + ".swift", "-o", str(PDFTEXT)], check=True)
     return PDFTEXT
