@@ -7,6 +7,7 @@ nothing is saved by the model on its own.
 """
 import datetime
 import json
+import re
 
 import history
 import vault
@@ -86,10 +87,29 @@ def find_patient(reference):
                                             (f"%{reference}%",))]
 
 
+def empty_reply():
+    return {"intent": "unclear", "sql": "", "explanation": "", "patient": "", "note_text": "", "note_date": "",
+            "patient_fields": {name: "" for name in PATIENT_FIELDS}}
+
+
+def ask_assistant(model, thinking, system, message):
+    """Ask the model, coping with replies that come back as plain text instead of the JSON asked for."""
+    try:
+        return history.ask(model, thinking, system, message, SCHEMA, max_tokens=3000)
+    except history.BadReply as bad:
+        # Models sometimes answer a question with just the SQL; that's still usable.
+        sql = re.search(r"```(?:sql)?\s*((?:SELECT|WITH)\b[\s\S]+?)```", bad.text, re.I) or \
+            re.search(r"^\s*((?:SELECT|WITH)\b[\s\S]+)$", bad.text, re.I)
+        if sql:
+            return {**empty_reply(), "intent": "question", "sql": sql.group(1).strip(), "explanation": "Here's what I found."}
+        return history.ask(model, thinking, system, message, SCHEMA, max_tokens=3000, history=[(
+            bad.text, "Reply with only the JSON object described in your instructions, with every field filled in.")])
+
+
 def handle(message, model, thinking, app_name):
     """Answer a question, or return a proposal to confirm. Never saves anything itself."""
     system = build_prompt(app_name)
-    reply = history.ask(model, thinking, system, message, SCHEMA, max_tokens=3000)
+    reply = {**empty_reply(), **ask_assistant(model, thinking, system, message)}
     intent, explanation = reply["intent"], reply["explanation"]
 
     if intent == "question":

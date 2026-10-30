@@ -1,21 +1,30 @@
-/* MindChart: warm, clinical look. Fonts are built into macOS, so nothing loads from the internet. */
+/* MindChart: mid-century modern, kept calm and clinical. Cream paper, walnut, deep teal, with mustard,
+   burnt orange and olive as accents. Futura and Avenir Next are built into macOS, so nothing loads
+   from the internet. */
 :root {
-  --bg: #f6f1e9; --bg-top: #efe6d8; --panel: #fffdf9; --panel-2: #faf6ef; --sidebar: #f1e9dd;
-  --text: #2e2a25; --muted: #7b7166; --border: #e7ddcf; --border-strong: #d8cab6;
-  --accent: #2f7a72; --accent-strong: #235f58; --accent-soft: #e2efea; --on-accent: #ffffff;
-  --warn: #b04a32; --warn-soft: #f9e8e1; --ok: #3d7b4f; --ok-soft: #e5f0e6;
-  --shadow: 0 1px 2px rgba(92, 66, 32, .05), 0 6px 20px rgba(92, 66, 32, .06);
-  --serif: "Iowan Old Style", Charter, "Palatino Linotype", Palatino, Georgia, serif;
-  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  --bg: #f4ecdf; --bg-top: #eee2cd; --panel: #fffaf2; --panel-2: #f8efe1;
+  --sidebar: #3a2a20; --sidebar-text: #f3e8d6; --sidebar-muted: #c3ab92; --sidebar-hover: #4a3629;
+  --text: #2b2420; --muted: #7a6a5c; --border: #e6d8c3; --border-strong: #d3bfa3;
+  --accent: #1f6f6a; --accent-strong: #165652; --accent-soft: #dcebe6; --on-accent: #fffaf2;
+  --mustard: #d6a02f; --mustard-soft: #f6e6c0; --orange: #c45f2c; --orange-soft: #f6dfd1;
+  --olive: #75843a; --olive-soft: #e6ebd2; --walnut: #6e4b35; --walnut-soft: #eadccd;
+  --warn: #b34a2b; --warn-soft: #f8e3d7; --ok: #4e7a32; --ok-soft: #e4eed9;
+  --shadow: 0 1px 2px rgba(80, 52, 28, .06), 0 8px 24px rgba(80, 52, 28, .07);
+  --serif: Futura, "Futura PT", "Avenir Next", sans-serif;  /* headings */
+  --quote: "Iowan Old Style", Charter, Georgia, serif;     /* quotes from source records */
+  --sans: "Avenir Next", Avenir, -apple-system, system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1b1916; --bg-top: #221f1b; --panel: #262320; --panel-2: #2c2925; --sidebar: #211e1b;
-    --text: #ede6dc; --muted: #a99f92; --border: #3a352f; --border-strong: #4a443c;
-    --accent: #74c2b6; --accent-strong: #93d5ca; --accent-soft: #233531; --on-accent: #10221f;
-    --warn: #ec8c72; --warn-soft: #3b2620; --ok: #8cc79a; --ok-soft: #22322a;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .25);
+    --bg: #1c1713; --bg-top: #231d18; --panel: #28211c; --panel-2: #2f2721;
+    --sidebar: #15100c; --sidebar-text: #efe4d2; --sidebar-muted: #a8927b; --sidebar-hover: #241b15;
+    --text: #f0e7d9; --muted: #b2a290; --border: #3d332b; --border-strong: #4f4339;
+    --accent: #5fb2a6; --accent-strong: #7fcabe; --accent-soft: #1d3330; --on-accent: #0f1f1d;
+    --mustard: #e2b04c; --mustard-soft: #3a2f17; --orange: #e0835a; --orange-soft: #3b2419;
+    --olive: #a5b56a; --olive-soft: #2a2f1b; --walnut: #c79a7a; --walnut-soft: #33261d;
+    --warn: #ec8c6c; --warn-soft: #3b2219; --ok: #9cc47f; --ok-soft: #233020;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3);
   }
 }
 * { box-sizing: border-box; }
@@ -151,7 +160,7 @@ td.clip { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-spa
 .section-group:first-child { border-top: 0; }
 .section-group summary { cursor: pointer; font-weight: 600; }
 .fact { padding: 7px 0 7px 2px; font-size: 14px; }
-.fact .quote { display: block; color: var(--muted); font: italic 13px/1.5 var(--serif); margin-top: 2px; }
+.fact .quote { display: block; color: var(--muted); font: italic 13px/1.5 var(--quote); margin-top: 2px; }
 .draft-section { border-left: 4px solid var(--accent); }
 .draft-section.blank { border-left-color: var(--border-strong); }
 .conflict { background: var(--warn-soft); color: var(--warn); border-radius: 10px; padding: 8px 12px; font-size: 14px; margin-top: 10px; }
@@ -160,7 +169,7 @@ progress::-webkit-progress-bar { background: var(--accent-soft); border-radius: 
 progress::-webkit-progress-value { background: var(--accent); border-radius: 999px; transition: width .3s; }
 .doc-pick { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 12px; }
 .doc-pick label { display: flex; gap: 8px; align-items: center; font-size: 14px; }
-.text-preview { white-space: pre-wrap; font: 13px/1.6 var(--serif); max-height: 420px; overflow: auto; background: var(--panel-2); border-radius: 10px; padding: 12px 14px; }
+.text-preview { white-space: pre-wrap; font: 13px/1.6 var(--quote); max-height: 420px; overflow: auto; background: var(--panel-2); border-radius: 10px; padding: 12px 14px; }
 
 @media (max-width: 820px) {
   #app { grid-template-columns: 1fr; }
@@ -214,3 +223,77 @@ html[data-effects="minimal"] *, html[data-effects="minimal"] *::before, html[dat
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 .hardware { font-size: 11.5px; color: var(--muted); line-height: 1.4; }
+
+
+/* --- Mid-century modern details -------------------------------------------------------- */
+h1, h2, .brand b, .signin-card h1 { letter-spacing: .01em; }
+.page-head h1 { font-weight: 500; }
+.card h2 { font-weight: 500; }
+.kicker { color: color-mix(in srgb, var(--mustard) 75%, var(--text)); letter-spacing: .16em; font-family: var(--serif); font-weight: 500; }
+
+/* Logo: a heartbeat in a teal circle with a mustard orbit ring */
+.logo { border-radius: 50%; box-shadow: 0 0 0 2.5px var(--sidebar), 0 0 0 4.5px var(--mustard); }
+.logo.big { border-radius: 50%; box-shadow: 0 0 0 4px var(--panel), 0 0 0 7px var(--mustard); }
+
+/* Walnut sidebar, like a teak credenza */
+#sidebar { background: var(--sidebar); color: var(--sidebar-text); border-right: 0;
+  background-image: radial-gradient(circle at 110% 104%, color-mix(in srgb, var(--mustard) 22%, transparent) 0 70px, transparent 71px),
+                    radial-gradient(circle at -12% 112%, color-mix(in srgb, var(--orange) 20%, transparent) 0 90px, transparent 91px); }
+#sidebar .brand { color: var(--sidebar-text); }
+#sidebar .brand small, #sidebar .muted, #sidebar .hardware { color: var(--sidebar-muted); }
+#sidebar a { color: var(--sidebar-text); }
+#nav a { color: var(--sidebar-text); border-radius: 999px; padding: 8px 14px; }
+#nav a:hover { background: var(--sidebar-hover); }
+#nav a.active { background: var(--mustard); color: #2b2016; }
+#nav a .i-patients { color: #7fc4ba; } #nav a .i-documents { color: var(--mustard); } #nav a .i-facts { color: #b9c77c; }
+#nav a .i-drafts { color: #e79a6f; } #nav a .i-activity { color: #d2b49c; }
+#nav a.active [class^="i-"] { color: #2b2016; }
+#sidebar select { background: var(--sidebar-hover); color: var(--sidebar-text); border-color: transparent; }
+#sidebar button.secondary { background: transparent; color: var(--sidebar-text); border-color: var(--sidebar-muted); }
+#sidebar button.secondary:hover:not(:disabled) { background: var(--sidebar-hover); border-color: var(--mustard); }
+.mcm-dots { display: flex; gap: 6px; padding: 0 8px; }
+.mcm-dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--mustard); }
+.mcm-dots i:nth-child(2) { background: var(--orange); } .mcm-dots i:nth-child(3) { background: #5fb2a6; }
+
+/* Pill-shaped controls */
+button, .chip { border-radius: 999px; }
+button { font-weight: 600; letter-spacing: .01em; padding: 10px 18px; }
+button.small { padding: 7px 14px; }
+#command { border-radius: 999px; padding-left: 18px; border-width: 1.5px; }
+#command .i-spark { color: var(--mustard); }
+input[type=text], input[type=password], input:not([type]), select, textarea { border-radius: 12px; }
+
+/* Each kind of record has its own colour */
+.object-icon { border-radius: 50%; }
+.obj-patients { background: var(--accent-soft); color: var(--accent); }
+.obj-documents { background: var(--mustard-soft); color: color-mix(in srgb, var(--mustard) 70%, var(--text)); }
+.obj-facts { background: var(--olive-soft); color: var(--olive); }
+.obj-drafts { background: var(--orange-soft); color: var(--orange); }
+.obj-activity { background: var(--walnut-soft); color: var(--walnut); }
+.uid { border-radius: 999px; padding: 5px 10px; background: var(--mustard-soft); border-color: transparent; color: color-mix(in srgb, var(--mustard) 55%, var(--text)); }
+
+/* Cards and tables */
+.card { border-radius: 20px; }
+.card h2 .count { background: var(--mustard-soft); color: color-mix(in srgb, var(--mustard) 55%, var(--text)); }
+th { font-family: var(--serif); font-weight: 500; letter-spacing: .1em; background: var(--panel-2); border-bottom: 2px solid var(--mustard-soft); }
+.table-wrap { border-radius: 14px; }
+.badge { background: var(--olive-soft); color: var(--olive); }
+.badge.plain { background: var(--panel-2); color: var(--muted); }
+.draft-section { border-left-color: var(--accent); }
+.conflict { border-left: 4px solid var(--orange); }
+.proposal { border-left-color: var(--mustard); }
+.shimmer::after { background: linear-gradient(90deg, transparent, var(--mustard), transparent); }
+progress::-webkit-progress-value { background: linear-gradient(90deg, var(--accent), var(--mustard)); }
+
+/* Sign-in: an atomic-age starburst behind the card */
+#signin { background:
+  radial-gradient(circle at 18% 22%, color-mix(in srgb, var(--mustard) 28%, transparent) 0 90px, transparent 91px),
+  radial-gradient(circle at 84% 78%, color-mix(in srgb, var(--accent) 22%, transparent) 0 140px, transparent 141px),
+  radial-gradient(circle at 78% 18%, color-mix(in srgb, var(--orange) 22%, transparent) 0 36px, transparent 37px),
+  url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-50 -50 100 100'%3E%3Cg stroke='%23d6a02f' stroke-width='1.2' stroke-linecap='round' opacity='.45'%3E%3Cpath d='M0-46V-20M0 20V46M-46 0H-20M20 0H46M-32-32-15-15M15 15 32 32M-32 32-15 15M15-15 32-32'/%3E%3C/g%3E%3Ccircle r='5' fill='%23d6a02f' opacity='.5'/%3E%3C/svg%3E") 12% 82% / 120px no-repeat,
+  url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-50 -50 100 100'%3E%3Cg stroke='%23c45f2c' stroke-width='1.2' stroke-linecap='round' opacity='.4'%3E%3Cpath d='M0-46V-20M0 20V46M-46 0H-20M20 0H46M-32-32-15-15M15 15 32 32M-32 32-15 15M15-15 32-32'/%3E%3C/g%3E%3C/svg%3E") 90% 30% / 70px no-repeat,
+  var(--bg); }
+.signin-card { border-radius: 28px; border-top: 6px solid var(--accent); }
+.signin-card h1 { font-weight: 500; font-size: 30px; }
+main { background: linear-gradient(180deg, var(--bg-top) 0, var(--bg) 260px) no-repeat; }
+#toast { background: var(--sidebar); color: var(--sidebar-text); border-radius: 999px; padding: 10px 18px; }

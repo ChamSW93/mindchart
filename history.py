@@ -165,6 +165,14 @@ class TooLong(Exception):
     """The model hit its output limit before finishing its answer."""
 
 
+class BadReply(Exception):
+    """The model answered, but not in the requested JSON format. The reply text is kept in .text."""
+
+    def __init__(self, text):
+        super().__init__("The model's reply wasn't in the expected format")
+        self.text = text
+
+
 def ask(model, thinking, system, user, schema, max_tokens, history=()):
     """One request to the local model, answered as JSON matching `schema`.
 
@@ -190,7 +198,18 @@ def ask(model, thinking, system, user, schema, max_tokens, history=()):
         reply = json.load(response)
     if reply.get("done_reason") == "length":
         raise TooLong()
-    return tidy(json.loads(reply["message"]["content"]))
+    content = reply["message"]["content"]
+    try:
+        return tidy(json.loads(content))
+    except json.JSONDecodeError:
+        # Sometimes the JSON comes wrapped in other text; use it if it's there.
+        start, end = content.find("{"), content.rfind("}")
+        if 0 <= start < end:
+            try:
+                return tidy(json.loads(content[start:end + 1]))
+            except json.JSONDecodeError:
+                pass
+        raise BadReply(content)
 
 
 # Some models write special spaces and hyphens that look odd in Word; swap them for plain ones.

@@ -5,17 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{APP_NAME}} Chat</title>
 <style>
-  /* Same warm palette as the main page. */
-  :root { --bg: #f6f1e9; --panel: #fffdf9; --text: #2e2a25; --muted: #7b7166; --accent: #2f7a72; --on-accent: #fff; --user: #e2efea; --border: #e7ddcf;
-          --serif: "Iowan Old Style", Charter, "Palatino Linotype", Palatino, Georgia, serif; }
+  /* Same mid-century palette as the main page. */
+  :root { --bg: #f4ecdf; --panel: #fffaf2; --text: #2b2420; --muted: #7a6a5c; --accent: #1f6f6a; --on-accent: #fffaf2; --user: #f6e6c0;
+          --border: #e6d8c3; --mustard: #d6a02f; --serif: Futura, "Futura PT", "Avenir Next", sans-serif; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #1b1916; --panel: #262320; --text: #ede6dc; --muted: #a99f92; --accent: #74c2b6; --on-accent: #10221f; --user: #233531; --border: #3a352f; }
+    :root { --bg: #1c1713; --panel: #28211c; --text: #f0e7d9; --muted: #b2a290; --accent: #5fb2a6; --on-accent: #0f1f1d; --user: #3a2f17;
+            --border: #3d332b; --mustard: #e2b04c; }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 -apple-system, system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 "Avenir Next", Avenir, -apple-system, system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
   header { padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   header h1 { font: 600 20px/1.1 var(--serif); margin: 0; display: flex; align-items: center; gap: 10px; }
-  header h1 svg { width: 30px; height: 30px; }
+  header h1 svg { width: 30px; height: 30px; border-radius: 50%; box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--mustard); }
   header a { margin-left: auto; color: var(--accent); font-size: 14px; text-decoration: none; font-weight: 500; }
   header label { color: var(--muted); font-weight: 400; font-size: 14px; display: flex; align-items: center; gap: 6px; }
   select { font: inherit; font-size: 14px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); max-width: 100%; }
@@ -30,7 +31,7 @@
   .error { color: #b04a32; }
   form { display: flex; gap: 8px; padding: 12px 16px; max-width: 760px; width: 100%; margin: 0 auto; }
   textarea { flex: 1; resize: none; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; }
-  button { padding: 0 18px; border: 0; border-radius: 12px; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 500; cursor: pointer; }
+  button { padding: 0 20px; border: 0; border-radius: 999px; background: var(--accent); color: var(--on-accent); font: inherit; font-weight: 500; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
   #attach { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 0 14px; font-size: 18px; }
   #chips { display: flex; flex-wrap: wrap; gap: 6px; max-width: 760px; width: 100%; margin: 0 auto; padding: 0 16px; }
@@ -43,7 +44,7 @@
 </head>
 <body>
 <header>
-  <h1><svg viewBox="0 0 34 34" aria-hidden="true"><rect width="34" height="34" rx="10" fill="var(--accent)"/>
+  <h1><svg viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="17" fill="var(--accent)"/>
     <path d="M7 18h5l2.5-6 4 11 3-8 1.5 3H27" fill="none" stroke="var(--on-accent)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>Chat</h1>
   <label>Model <select id="model"><option>Loading…</option></select></label>
   <a href="/">← Back to {{APP_NAME}}</a>

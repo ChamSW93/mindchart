@@ -293,7 +293,7 @@ async function listView(object, search = "") {
   if (!spec) throw new Error("Unknown page");
   const data = await api("GET", `records/${object}?search=${encodeURIComponent(search)}`);
   $("#view").innerHTML = `
-    <div class="page-head"><span class="object-icon"><span class="${ICONS[object]}"></span></span>
+    <div class="page-head"><span class="object-icon obj-${object}"><span class="${ICONS[object]}"></span></span>
       <h1>${esc(spec.plural)}</h1><span class="badge plain">${data.rows.length}</span><span class="grow"></span>
       ${object === "patients" ? '<button id="newPatient">+ New patient</button>' : ""}</div>
     <div id="newPatientForm"></div>
@@ -357,7 +357,7 @@ async function recordView(object, uid, editing = false) {
   const title = object === "drafts" ? `History draft · ${String(record.created).replace("T", " ").slice(0, 16)}`
     : object === "facts" ? (state.sectionTitles[record.section] || "Fact") : record[spec.title_field];
   $("#view").innerHTML = `
-    <div class="page-head"><span class="object-icon"><span class="${ICONS[object]}"></span></span>
+    <div class="page-head"><span class="object-icon obj-${object}"><span class="${ICONS[object]}"></span></span>
       <div><div class="kicker">${esc(spec.label)}</div><h1>${esc(title)}</h1></div>
       <span class="uid" title="Click to copy" id="uidChip">${esc(uid)}</span><span class="grow"></span>
       <div class="actions" id="recordActions"></div></div>

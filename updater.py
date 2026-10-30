@@ -89,8 +89,8 @@ def install(release):
 
 
 def main():
-    if REPOSITORY.startswith("OWNER/"):
-        return  # a development copy that isn't connected to a release channel
+    if REPOSITORY.startswith("OWNER/") or (HERE / ".git").exists():
+        return  # the working copy where MindChart is developed; never overwrite it with a release
     latest = latest_release()
     if not latest:
         print("Couldn't check for updates (offline?). Starting the current version.")
