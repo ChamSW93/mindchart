@@ -129,7 +129,8 @@ Write the "{title}" section using ONLY the numbered facts provided, as a list of
 - For each sentence, list the numbers of the facts it relies on in "facts". Every sentence needs at least one.
 - Clinical, concise, third person. Order events chronologically where dates allow.
 - Never add information that is not in the facts. Do not diagnose or interpret.
-- Never calculate ages, durations or dates. Use them only as the facts state them, with the date of the source.
+- Never calculate ages, durations or dates. When stating an age or a "current" detail, say which source date it is as of
+  (for example "12 years old as of 09/18/2023").
 - Only include facts that belong in this section; leave out any that belong elsewhere.
 - Keep every specific detail: each score, dose, date, frequency and name. Don't summarize them away.
 - Combine facts that repeat across documents into one sentence citing all of them.
@@ -369,8 +370,9 @@ def build(documents, model, thinking):
         narrative, conflicts = "No information found in the provided records.", []
         if usable:
             numbered = "\n".join(
-                f"[{n}] ({documents[f['doc']]['document_type']}, {documents[f['doc']]['document_date'] or 'undated'}) "
-                f"{f['fact']}{' Date: ' + f['date'] if f['date'] else ''}"
+                # The event's date goes inside the source note, so it isn't copied into the text as "Date: ...".
+                f"[{n}] (source: {documents[f['doc']]['document_type']}, {documents[f['doc']]['document_date'] or 'undated'}"
+                f"{'; happened: ' + f['date'] if f['date'] else ''}) {f['fact']}"
                 for n, f in enumerate(usable, 1)
             )
             try:

@@ -15,7 +15,7 @@ if lsof -nP -iTCP:8000 -sTCP:LISTEN > /dev/null; then
   exit 0
 fi
 
-python3 updater.py  # installs a newer version first, if one has been published
+/usr/bin/python3 updater.py  # installs a newer version first, if one has been published
 
 (sleep 1 && open http://localhost:8000) &
-python3 server.py
+/usr/bin/python3 server.py

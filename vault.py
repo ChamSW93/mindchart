@@ -19,7 +19,11 @@ OBJECTS below and used everywhere: the database, the app's pages, and the assist
 The data lives outside the app's folder, so tools used to work on the app's code never see it.
 """
 import contextlib
+import csv
 import datetime
+import getpass
+import hashlib
+import io
 import json
 import os
 import secrets
@@ -36,7 +40,16 @@ MOUNT = HOME / ".unlocked"
 DATABASE = MOUNT / "records.db"
 AUTO_LOCK_MINUTES = 15
 MIN_PASSWORD_LENGTH = 10
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+BACKUPS_KEPT = 5
+MAX_ATTEMPTS = 5  # wrong passwords allowed before MindChart makes you wait
+
+# How to upgrade saved data from one layout to the next: {new version: function(db)}.
+# When a future version changes the tables, add a step here and raise SCHEMA_VERSION. Before any
+# step runs, the database is backed up (inside the encrypted store), and each step runs in a
+# transaction, so a failed upgrade leaves the data exactly as it was.
+MIGRATIONS = {}  # filled in below, after the functions the steps use
+SETTINGS_TABLE = "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);"
 
 _last_activity = time.time()
 _lock = threading.Lock()
@@ -96,9 +109,10 @@ OBJECTS = {
         ],
     },
     "activity": {
-        "label": "Activity", "plural": "Activity", "prefix": "ACT", "title_field": "action", "parent": "patients",
+        "label": "Activity", "plural": "Activity", "prefix": "ACT", "title_field": "action",
         "fields": [
             {"name": "time", "label": "Time", "type": "datetime", "edit": False},
+            {"name": "actor", "label": "By", "type": "text", "edit": False},
             {"name": "action", "label": "Action", "type": "text", "edit": False},
             {"name": "detail", "label": "Detail", "type": "text", "edit": False},
         ],
@@ -118,30 +132,36 @@ def table_sql(name):
         on_delete = "SET NULL" if name == "activity" else "CASCADE"  # keep the log when a patient is deleted
         columns.append(f"{PARENT_COLUMN[spec['parent']]} INTEGER REFERENCES {spec['parent']}(id) ON DELETE {on_delete}")
     columns += [f"{f['name']} {column_type(f)}" for f in spec["fields"]]
-    columns += {"documents": ["original BLOB", "pages TEXT", "read_at TEXT"], "drafts": ["result TEXT"]}.get(name, [])
+    columns += {"documents": ["original BLOB", "pages TEXT", "read_at TEXT"], "drafts": ["result TEXT"],
+                # The log names its patient by record ID rather than a link that could change or be reused,
+                # and each entry carries a hash chained to the one before (see chain_hash).
+                "activity": ["patient_uid TEXT", "hash TEXT"]}.get(name, [])
     return f"CREATE TABLE IF NOT EXISTS {name} ({', '.join(columns)});"
 
 
 # Views with patient and document details joined in, used by lists, search and the assistant.
 VIEWS = """
-CREATE VIEW IF NOT EXISTS patients_view AS
+DROP VIEW IF EXISTS patients_view; DROP VIEW IF EXISTS documents_view; DROP VIEW IF EXISTS facts_view;
+DROP VIEW IF EXISTS drafts_view; DROP VIEW IF EXISTS activity_view;
+CREATE VIEW patients_view AS
     SELECT p.uid AS id, p.name, p.dob, p.gender, p.mrn, p.status, p.placement, p.admitted, p.guardian, p.notes, p.created,
            (SELECT COUNT(*) FROM documents d WHERE d.patient_id = p.id) AS documents
     FROM patients p;
-CREATE VIEW IF NOT EXISTS documents_view AS
+CREATE VIEW documents_view AS
     SELECT d.uid AS id, p.uid AS patient_id, p.name AS patient, d.name, d.kind, d.document_type, d.document_date,
            d.author, d.added, d.read_by_model, (SELECT COUNT(*) FROM facts f WHERE f.document_id = d.id) AS facts
     FROM documents d JOIN patients p ON p.id = d.patient_id;
-CREATE VIEW IF NOT EXISTS facts_view AS
+CREATE VIEW facts_view AS
     SELECT f.uid AS id, p.uid AS patient_id, p.name AS patient, d.uid AS document_id, d.name AS document,
            d.document_type, d.document_date, f.section, f.fact, f.date, f.quote, f.page, f.verified, f.edited
     FROM facts f JOIN documents d ON d.id = f.document_id JOIN patients p ON p.id = d.patient_id;
-CREATE VIEW IF NOT EXISTS drafts_view AS
+CREATE VIEW drafts_view AS
     SELECT r.uid AS id, p.uid AS patient_id, p.name AS patient, r.created, r.updated, r.model
     FROM drafts r JOIN patients p ON p.id = r.patient_id;
-CREATE VIEW IF NOT EXISTS activity_view AS
-    SELECT a.uid AS id, p.uid AS patient_id, p.name AS patient, a.time, a.action, a.detail
-    FROM activity a LEFT JOIN patients p ON p.id = a.patient_id;
+CREATE VIEW activity_view AS
+    SELECT a.uid AS id, a.patient_uid AS patient_id, p.name AS patient, a.time, a.actor, a.action, a.detail,
+           a.id AS seq  -- the order entries were written, for sorting entries made in the same second
+    FROM activity a LEFT JOIN patients p ON p.uid = a.patient_uid;
 """
 
 
@@ -166,9 +186,11 @@ def is_unlocked():
     return os.path.ismount(MOUNT)
 
 
-def create(password):
+def create(password, user_name):
     if IMAGE.exists():
         raise ValueError("MindChart is already set up")
+    if not user_name.strip():
+        raise ValueError("Enter your name, so the activity log shows who did what")
     if len(password) < MIN_PASSWORD_LENGTH:
         raise ValueError(f"Use a password of at least {MIN_PASSWORD_LENGTH} characters")
     HOME.mkdir(parents=True, exist_ok=True)
@@ -180,25 +202,79 @@ def create(password):
     if result.returncode != 0:
         raise ValueError("Couldn't set up encrypted storage: " + result.stderr.decode().strip())
     unlock(password)
+    set_setting("user_name", user_name.strip())
     log("set up MindChart")
 
 
+_failed_attempts = 0
+_wait_until = 0.0
+
+
 def unlock(password):
+    global _failed_attempts, _wait_until
     with _lock:
         if is_unlocked():
             touch()
             return
+        if time.time() < _wait_until:  # slows down anyone guessing passwords
+            raise ValueError(f"Too many wrong passwords. Try again in {int(_wait_until - time.time()) + 1} seconds.")
         MOUNT.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
             ["hdiutil", "attach", "-stdinpass", "-nobrowse", "-mountpoint", str(MOUNT), str(IMAGE)],
             input=password.encode(), capture_output=True)
         if result.returncode != 0:
-            raise ValueError("Wrong password" if b"Authentication" in result.stderr else result.stderr.decode().strip())
-        with connect() as db:
-            db.executescript("\n".join(table_sql(name) for name in OBJECTS) + VIEWS)
-            db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")  # lets future versions upgrade saved data safely
+            if b"Authentication" not in result.stderr:
+                raise ValueError(result.stderr.decode().strip())
+            _failed_attempts += 1
+            if _failed_attempts >= MAX_ATTEMPTS:  # 30 seconds, then doubling, up to 15 minutes
+                _wait_until = time.time() + min(30 * 2 ** (_failed_attempts - MAX_ATTEMPTS), 900)
+            raise ValueError("Wrong password")
+        try:
+            with connect() as db:
+                prepare_database(db)
+        except Exception:
+            subprocess.run(["hdiutil", "detach", "-force", str(MOUNT)], capture_output=True)  # never leave it half-open
+            raise
         touch()
-    log("signed in")
+        failures, _failed_attempts = _failed_attempts, 0
+    log("signed in" + (f" after {failures} wrong password attempt{'s' if failures > 1 else ''}" if failures else ""))
+
+
+def prepare_database(db):
+    """Create the tables on first use, or upgrade saved data from an older version of MindChart."""
+    db.execute("PRAGMA journal_mode = WAL")  # lets reads carry on while a long history build is writing
+    version = db.execute("PRAGMA user_version").fetchone()[0]
+    has_tables = db.execute("SELECT COUNT(*) FROM sqlite_master WHERE name = 'patients'").fetchone()[0]
+    if has_tables and version > SCHEMA_VERSION:
+        raise ValueError("These records were saved by a newer version of MindChart. Update MindChart to open them.")
+    if has_tables and version < SCHEMA_VERSION:
+        back_up(db, f"before-upgrade-to-v{SCHEMA_VERSION}")
+        db.isolation_level = None  # handle transactions here, so changes to tables are undone too on failure
+        for target in range(version + 1, SCHEMA_VERSION + 1):
+            db.execute("BEGIN")  # one transaction per step: all of it happens, or none of it
+            try:
+                MIGRATIONS[target](db)
+                db.execute(f"PRAGMA user_version = {target}")
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        db.isolation_level = ""
+    db.executescript("\n".join(table_sql(name) for name in OBJECTS) + SETTINGS_TABLE + VIEWS)  # adds anything missing
+    db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+
+def back_up(db, reason):
+    """Copy the database to backups/ inside the encrypted store, keeping the most recent few."""
+    folder = MOUNT / "backups"
+    folder.mkdir(exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = sqlite3.connect(folder / f"records-{stamp}-{reason}.db")
+    with target:
+        db.backup(target)
+    target.close()
+    for old in sorted(folder.glob("records-*.db"))[:-BACKUPS_KEPT]:
+        old.unlink()
 
 
 def lock(reason="locked"):
@@ -232,7 +308,9 @@ def connect(read_only=False):
     """Open the database, save changes when done, and always close it (so locking never finds it in use)."""
     if not is_unlocked():
         raise PermissionError("MindChart is locked")
-    db = sqlite3.connect(f"file:{DATABASE}?mode=ro", uri=True) if read_only else sqlite3.connect(DATABASE)
+    # timeout: if another part of MindChart is writing, wait for it rather than failing with "database is locked".
+    db = (sqlite3.connect(f"file:{DATABASE}?mode=ro", uri=True, timeout=15) if read_only
+          else sqlite3.connect(DATABASE, timeout=15))
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys = ON")
     try:
@@ -271,17 +349,96 @@ def patient_of(db, name, row_id):
         "documents": "SELECT patient_id FROM documents WHERE id = ?",
         "facts": "SELECT d.patient_id FROM facts f JOIN documents d ON d.id = f.document_id WHERE f.id = ?",
         "drafts": "SELECT patient_id FROM drafts WHERE id = ?",
-        "activity": "SELECT patient_id FROM activity WHERE id = ?",
     }[name]
     row = db.execute(query, (row_id,)).fetchone()
     return row[0] if row else None
 
 
+_log_lock = threading.Lock()
+
+
+def chain_hash(previous, uid, time_, actor, action, patient_uid, detail):
+    """A fingerprint of one log entry plus the entry before it. Changing, removing or reordering any
+    past entry breaks every fingerprint after it, which verify_audit() detects."""
+    text = "|".join(str(v or "") for v in (previous, uid, time_, actor, action, patient_uid, detail))
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def actor(db):
+    """Who is using MindChart: the name given at setup, and the Mac account."""
+    row = db.execute("SELECT value FROM settings WHERE key = 'user_name'").fetchone()
+    return f"{row[0] if row else 'Unknown'} (Mac user {getpass.getuser()})"
+
+
 def log(action, patient_id=None, detail=""):
+    """Add an entry to the activity log. Entries are never edited or deleted."""
     if not is_unlocked():
         return
+    with _log_lock, connect() as db:
+        patient = db.execute("SELECT uid FROM patients WHERE id = ?", (patient_id,)).fetchone() if patient_id else None
+        patient_uid = patient[0] if patient else None
+        last = db.execute("SELECT hash FROM activity WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1").fetchone()
+        uid, time_, who = new_uid("ACT"), now(), actor(db)
+        db.execute("INSERT INTO activity (uid, patient_uid, time, actor, action, detail, hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   (uid, patient_uid, time_, who, action, detail,
+                    chain_hash(last[0] if last else "", uid, time_, who, action, patient_uid, detail)))
+
+
+def verify_audit():
+    """Recheck every fingerprint in the activity log. Returns whether it's intact and how many entries it has."""
+    previous, count = "", 0
+    with connect(read_only=True) as db:
+        for r in db.execute("SELECT uid, time, actor, action, patient_uid, detail, hash FROM activity ORDER BY id"):
+            expected = chain_hash(previous, r["uid"], r["time"], r["actor"], r["action"], r["patient_uid"], r["detail"])
+            if r["hash"] != expected:
+                return {"ok": False, "entries": count, "problem_at": r["uid"]}
+            previous, count = expected, count + 1
+    return {"ok": True, "entries": count}
+
+
+def export_audit():
+    """The whole activity log as CSV, for compliance review."""
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(["id", "time", "by", "action", "patient_id", "patient", "detail", "hash"])
+    with connect(read_only=True) as db:
+        for r in db.execute("""SELECT a.uid, a.time, a.actor, a.action, a.patient_uid, p.name, a.detail, a.hash
+                               FROM activity a LEFT JOIN patients p ON p.uid = a.patient_uid ORDER BY a.id"""):
+            writer.writerow(list(r))
+    return out.getvalue()
+
+
+def get_setting(key, default=""):
     with connect() as db:
-        insert(db, "activity", {"patient_id": patient_id, "time": now(), "action": action, "detail": detail})
+        row = db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(key, value):
+    with connect() as db:
+        db.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                   (key, value))
+
+
+def change_password(current, new):
+    """Change the password that encrypts MindChart's data."""
+    if len(new) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"Use a new password of at least {MIN_PASSWORD_LENGTH} characters")
+    if not is_unlocked():
+        raise PermissionError("MindChart is locked")
+    passwords = f"{current}\0{new}".encode()
+    chpass = ["hdiutil", "chpass", "-oldstdinpass", "-newstdinpass", str(IMAGE)]
+    # macOS only changes the password while the data is closed, but it does check the current password
+    # while open, so check that first: a typo then doesn't lock anyone out.
+    if b"Authentication" in subprocess.run(chpass, input=passwords, capture_output=True).stderr:
+        raise ValueError("Your current password isn't right")
+    log("changed the password")
+    lock("locked to change the password")
+    result = subprocess.run(chpass, input=passwords, capture_output=True)
+    if result.returncode != 0:
+        unlock(current)
+        raise ValueError("Couldn't change the password: " + result.stderr.decode().strip())
+    unlock(new)
 
 
 def clean_fields(name, fields, creating=False):
@@ -324,7 +481,7 @@ def list_records(name, search="", patient_uid=None, limit=1000):
             where.append("patient_id = ?")
             args.append(patient_uid)
         order = {"patients": "name COLLATE NOCASE", "documents": "added DESC", "facts": "document_date DESC, section",
-                 "drafts": "created DESC", "activity": "time DESC"}[name]
+                 "drafts": "created DESC", "activity": "seq DESC"}[name]
         rows = db.execute(f"SELECT * FROM {view} {'WHERE ' + ' AND '.join(where) if where else ''} "
                           f"ORDER BY {order} LIMIT ?", (*args, limit)).fetchall()
     return {"columns": columns, "rows": [dict(r) for r in rows]}
@@ -390,8 +547,10 @@ def update_record(name, uid, fields):
             values["edited"] = now()
         db.execute(f"UPDATE {name} SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?", (*values.values(), row_id))
         patient_id = patient_of(db, name, row_id)
+    # The log keeps what each field was and what it became (inside the encrypted store), so any change can be traced.
     labels = {f["name"]: f["label"].lower() for f in OBJECTS[name]["fields"]}
-    changed = ", ".join(labels[k] for k in values if k != "edited")
+    short = lambda v: (str(v) if v not in (None, "") else "(blank)")[:120]
+    changed = "; ".join(f"{labels[k]}: {short(current.get(k))} → {short(v)}" for k, v in values.items() if k != "edited")
     log(f"edited {OBJECTS[name]['label'].lower()}", patient_id, f"{uid}: {changed}")
 
 
@@ -511,3 +670,20 @@ def run_query(sql, limit=500):
         columns = [d[0] for d in cursor.description]
         rows = [[("(file)" if isinstance(v, bytes) else v) for v in row] for row in cursor.fetchmany(limit)]
     return {"columns": columns, "rows": rows}
+
+
+# --- Upgrades for data saved by earlier versions ----------------------------------
+
+def upgrade_to_v2(db):
+    """Version 2: who did each thing, patients named by record ID in the log, a tamper-evident log, and settings."""
+    for column in ("actor", "patient_uid", "hash"):
+        db.execute(f"ALTER TABLE activity ADD COLUMN {column} TEXT")
+    db.execute(SETTINGS_TABLE)
+    db.execute("UPDATE activity SET patient_uid = (SELECT uid FROM patients WHERE patients.id = activity.patient_id)")
+    previous = ""  # seal the existing entries into the chain, oldest first
+    for r in db.execute("SELECT id, uid, time, actor, action, patient_uid, detail FROM activity ORDER BY id").fetchall():
+        previous = chain_hash(previous, r["uid"], r["time"], r["actor"], r["action"], r["patient_uid"], r["detail"])
+        db.execute("UPDATE activity SET hash = ? WHERE id = ?", (previous, r["id"]))
+
+
+MIGRATIONS[2] = upgrade_to_v2

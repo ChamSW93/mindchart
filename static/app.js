@@ -5,13 +5,20 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const state = { session: null, objects: null, sectionTitles: {}, models: [], dirtyDraft: false };
 const ICONS = { patients: "i-patients", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity" };
 const PREFIXES = { PT: "patients", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity" };
-const HIDDEN_COLUMNS = ["patient_id", "document_id", "notes", "quote", "read_by_model"];
+const HIDDEN_COLUMNS = ["patient_id", "document_id", "notes", "quote", "read_by_model", "seq"];
 const EXAMPLES = [
   "Which patients have an order of protection?",
   "List current medications for each active patient",
   "Show facts that aren't verified yet",
   "New patient: Maria Lopez, DOB 03/04/2012, placement Cottage 4",
 ];
+
+// Every request to MindChart's server carries this header. The server refuses requests without it,
+// which stops other web pages open on this Mac from sending it commands.
+const plainFetch = window.fetch.bind(window);
+window.fetch = (url, options = {}) => String(url).startsWith("/api/")
+  ? plainFetch(url, { ...options, headers: { ...(options.headers || {}), "X-MindChart": "1" } })
+  : plainFetch(url, options);
 
 // Forms here are handled by code, never by the browser reloading the page.
 document.addEventListener("submit", (e) => e.preventDefault(), true);
@@ -105,6 +112,7 @@ function showSignin(message = "") {
   $("#signinIntro").textContent = message || (setUp ? "Enter your password to open your records." :
     "Welcome. Choose a password to protect your records on this computer.");
   $("#password2").hidden = setUp;
+  $("#userName").hidden = setUp;
   $("#password").autocomplete = setUp ? "current-password" : "new-password";
   $("#password").placeholder = setUp ? "Password" : `New password (${state.session?.min_password_length || 10}+ characters)`;
   $("#signinBtn").textContent = setUp ? "Unlock" : "Set up MindChart";
@@ -112,7 +120,7 @@ function showSignin(message = "") {
     "Your records are encrypted with this password. Keep it somewhere safe: if it's lost, the records can't be recovered.";
   $("#signinError").textContent = "";
   $("#password").value = $("#password2").value = "";
-  $("#password").focus();
+  (setUp ? $("#password") : $("#userName")).focus();
 }
 
 $("#signinForm").onsubmit = async () => {
@@ -121,7 +129,8 @@ $("#signinForm").onsubmit = async () => {
   if (!setUp && password !== $("#password2").value) { $("#signinError").textContent = "The passwords don't match."; return false; }
   $("#signinBtn").disabled = true;
   try {
-    state.session = { ...state.session, ...(await api("POST", setUp ? "session/unlock" : "session/setup", { password })) };
+    const body = setUp ? { password } : { password, name: $("#userName").value };
+    state.session = { ...state.session, ...(await api("POST", setUp ? "session/unlock" : "session/setup", body)) };
     await enterApp();
   } catch (err) {
     $("#signinError").textContent = err.message;
@@ -161,6 +170,7 @@ async function loadModels() {
   try { saved = localStorage.getItem("model"); } catch {}
   const names = data.models.map((m) => m.name);
   $("#model").innerHTML = data.models.map((m) => `<option value="${esc(m.name)}">${esc(m.name)} · ${m.size_gb} GB${m.fits ? "" : " · slow on this Mac"}</option>`).join("");
+  showDownload();
   if (state.system) {
     const v = state.system.version || {};
     $("#hardware").innerHTML = `${esc(state.system.chip)} · ${state.system.memory_gb} GB<br>Version ${esc(v.current || "")}` +
@@ -168,6 +178,21 @@ async function loadModels() {
   }
   $("#model").value = names.includes(saved) ? saved : names.includes(data.default) ? data.default : names[0];
 }
+// When MindChart is fetching this Mac's recommended model (e.g. after an update), show progress until it's ready.
+async function showDownload() {
+  const d = state.system?.download || {};
+  let box = document.getElementById("download");
+  if (d.status !== "downloading" && !box) return;
+  if (!box) { $("#hardware").insertAdjacentHTML("beforebegin", '<div class="hardware" id="download"></div>'); box = document.getElementById("download"); }
+  if (d.status === "downloading") {
+    box.innerHTML = `<b>Downloading the recommended AI model (${esc(d.model)}): ${d.percent}%</b><br>You can keep working meanwhile.`;
+    setTimeout(async () => { state.system = await (await fetch("/api/system")).json(); showDownload(); }, 3000);
+  } else {
+    box.remove();
+    if (d.status === "done") { await loadModels(); toast(`${d.model} is ready`); }
+  }
+}
+
 $("#model").onchange = () => { try { localStorage.setItem("model", $("#model").value); } catch {} };
 
 window.addEventListener("beforeunload", (e) => { if (state.dirtyDraft) e.preventDefault(); });
@@ -177,7 +202,7 @@ window.addEventListener("beforeunload", (e) => { if (state.dirtyDraft) e.prevent
 function renderNav() {
   const here = location.hash || "#/";
   const items = [["#/", "Home", "i-home"], ...["patients", "documents", "facts", "drafts", "activity"]
-    .map((o) => [`#/list/${o}`, state.objects[o].plural, ICONS[o]])];
+    .map((o) => [`#/list/${o}`, state.objects[o].plural, ICONS[o]]), ["#/settings", "Settings", "i-settings"]];
   $("#nav").innerHTML = items.map(([href, text, icon]) => {
     const object = href.split("/")[2];
     const active = here === href || (object && here.startsWith(`#/r/${object}/`)) ? "active" : "";
@@ -205,6 +230,7 @@ async function route() {
     if (!parts.length) await homeView();
     else if (parts[0] === "list") await listView(parts[1]);
     else if (parts[0] === "r") await recordView(parts[1], decodeURIComponent(parts[2]));
+    else if (parts[0] === "settings") await settingsView();
     else await homeView();
   } catch (err) {
     if (!$("#app").hidden) $("#view").innerHTML = `<div class="card"><p class="error">${esc(err.message)}</p></div>`;
@@ -236,9 +262,12 @@ function aiBusy(on) {
 // --- Home --------------------------------------------------------------------------
 
 async function homeView() {
-  const patients = (await api("GET", "records/patients")).rows;
+  const [patients, settings] = await Promise.all([api("GET", "records/patients").then((d) => d.rows), api("GET", "settings")]);
   $("#view").innerHTML = `
-    <div class="page-head"><div><div class="kicker">Welcome back</div><h1>What would you like to do?</h1></div></div>
+    ${settings.filevault ? "" : `<div class="banner">⚠ This Mac's disk encryption (FileVault) is off. MindChart's own data is encrypted, but exported
+      Word files and anything else on this Mac aren't. Turn it on in System Settings → Privacy & Security → FileVault.</div>`}
+    <div class="page-head"><div><div class="kicker">Welcome back${settings.user_name ? ", " + esc(settings.user_name.split(" ")[0]) : ""}</div>
+      <h1>What would you like to do?</h1></div></div>
     <div class="card">
       <h2>Try asking</h2>
       <div class="chips">${EXAMPLES.map((e) => `<button class="chip" data-example="${esc(e)}">${esc(e)}</button>`).join("")}</div>
@@ -549,11 +578,63 @@ function draftView(data, body) {
   };
   $("#saveDraft").onclick = () => save().catch((err) => $("#saveMsg").textContent = err.message);
   $("#exportDraft").onclick = async () => {
+    if (!state.exportWarned && !confirm("The Word file won't be encrypted once it leaves MindChart. Save it only where your organization allows patient records. Continue?")) return;
+    state.exportWarned = true;
     if (state.dirtyDraft) await save();
-    const res = await api("POST", "export", { sections: result.sections, documents: result.documents });
+    const res = await api("POST", "export", { sections: result.sections, documents: result.documents, draft_id: uid });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(await res.blob());
     link.download = `History draft - ${data.record.patient}.docx`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  };
+}
+
+// --- Settings ----------------------------------------------------------------------
+
+async function settingsView() {
+  const s = await api("GET", "settings");
+  const status = (ok, good, bad) => `<span class="${ok ? "status-ok" : "status-bad"}">${ok ? "✓ " + good : "⚠ " + bad}</span>`;
+  $("#view").innerHTML = `
+    <div class="page-head"><span class="object-icon obj-activity"><span class="i-settings"></span></span><h1>Settings</h1></div>
+    <div class="grid2">
+      <form class="card" id="nameForm" onsubmit="return false"><h2>Your name</h2>
+        <p class="muted small">Shown in the activity log next to everything you do.</p>
+        <div class="row"><input name="name" value="${esc(s.user_name)}" style="flex:1"><button type="submit" class="small">Save</button></div>
+        <p class="error"></p></form>
+      <form class="card" id="passwordForm" onsubmit="return false"><h2>Change password</h2>
+        <p class="muted small">Your records are re-protected with the new password. Keep it somewhere safe: a lost password can't be recovered.</p>
+        <div class="fields"><div class="field"><label>Current password</label><input type="password" name="current" autocomplete="current-password"></div>
+          <div class="field"><label>New password</label><input type="password" name="new" autocomplete="new-password"></div>
+          <div class="field"><label>New password again</label><input type="password" name="again" autocomplete="new-password"></div></div>
+        <div class="actions" style="margin-top:12px"><button type="submit" class="small">Change password</button><span class="error"></span></div></form>
+    </div>
+    <div class="card"><h2>Security</h2><div class="fields">
+      <div class="field"><label>Records encrypted</label><div class="value">${status(true, "AES-256, locked with your password", "")}</div></div>
+      <div class="field"><label>Mac disk encryption (FileVault)</label><div class="value">${status(s.filevault, "On", "Off: turn it on in System Settings → Privacy & Security")}</div></div>
+      <div class="field"><label>Automatic lock</label><div class="value">${status(true, `After ${s.auto_lock_minutes} minutes without activity`, "")}</div></div>
+      <div class="field"><label>Activity log</label><div class="value">${status(s.audit.ok, `Intact, ${s.audit.entries} entries checked`, `Altered at entry ${esc(s.audit.problem_at || "")}`)}</div></div>
+      <div class="field wide"><label>Records are stored in</label><div class="value small">${esc(s.data_location)}</div></div>
+      <div class="field wide"><label>Error log (no patient details; send this if something goes wrong)</label><div class="value small">${esc(s.log_file)}</div></div>
+      <div class="field"><label>Version</label><div class="value">${esc(s.version.current)}</div></div>
+    </div>
+    <div class="actions" style="margin-top:14px"><button class="secondary small" id="exportAudit">Export activity log (CSV)</button></div></div>`;
+
+  $("#nameForm").onsubmit = async () => {
+    try { await api("POST", "settings/name", { name: $("#nameForm [name=name]").value }); toast("Name saved ✓"); }
+    catch (err) { $("#nameForm .error").textContent = err.message; }
+  };
+  $("#passwordForm").onsubmit = async () => {
+    const v = formValues($("#passwordForm"));
+    if (v.new !== v.again) { $("#passwordForm .error").textContent = "The new passwords don't match."; return; }
+    try { await api("POST", "settings/password", { current: v.current, new: v.new }); $("#passwordForm").reset(); toast("Password changed ✓"); }
+    catch (err) { $("#passwordForm .error").textContent = err.message; }
+  };
+  $("#exportAudit").onclick = async () => {
+    const res = await api("GET", "audit.csv");
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(await res.blob());
+    link.download = "MindChart activity log.csv";
     link.click();
     URL.revokeObjectURL(link.href);
   };

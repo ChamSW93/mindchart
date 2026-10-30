@@ -1,0 +1,15 @@
+# Runs MindChart's tests on a clean Mac whenever code is pushed, using Apple's built-in Python,
+# so anything that only works on the developer's Mac is caught before it reaches anyone else.
+name: Tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python version
+        run: /usr/bin/python3 --version
+      - name: Run tests
+        run: scripts/test.sh -v

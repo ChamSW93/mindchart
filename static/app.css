@@ -53,6 +53,7 @@ a:hover { text-decoration: underline; }
 .i-facts { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'%3E%3Cpath d='M7 5.5h10M7 10h10M7 14.5h10'/%3E%3Ccircle cx='3.5' cy='5.5' r='.9' fill='black'/%3E%3Ccircle cx='3.5' cy='10' r='.9' fill='black'/%3E%3Ccircle cx='3.5' cy='14.5' r='.9' fill='black'/%3E%3C/svg%3E"); }
 .i-drafts { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.7' stroke-linejoin='round'%3E%3Cpath d='M12.5 3.5 16.5 7.5 8 16H4v-4z'/%3E%3Cpath d='m10.5 5.5 4 4'/%3E%3C/svg%3E"); }
 .i-activity { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='10' cy='10' r='7'/%3E%3Cpath d='M10 6v4l2.5 2.5'/%3E%3C/svg%3E"); }
+.i-settings { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6'%3E%3Ccircle cx='10' cy='10' r='2.6'/%3E%3Cpath d='M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6'/%3E%3C/svg%3E"); }
 .i-lock { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.7'%3E%3Crect x='4' y='9' width='12' height='8' rx='2'/%3E%3Cpath d='M7 9V6.5a3 3 0 0 1 6 0V9'/%3E%3C/svg%3E"); }
 .i-spark { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M10 2.5c.6 3.6 1.9 4.9 5.5 5.5-3.6.6-4.9 1.9-5.5 5.5-.6-3.6-1.9-4.9-5.5-5.5 3.6-.6 4.9-1.9 5.5-5.5Z'/%3E%3Cpath d='M15.5 13c.3 1.6.9 2.2 2.5 2.5-1.6.3-2.2.9-2.5 2.5-.3-1.6-.9-2.2-2.5-2.5 1.6-.3 2.2-.9 2.5-2.5Z'/%3E%3C/svg%3E"); }
 
@@ -297,3 +298,8 @@ progress::-webkit-progress-value { background: linear-gradient(90deg, var(--acce
 .signin-card h1 { font-weight: 500; font-size: 30px; }
 main { background: linear-gradient(180deg, var(--bg-top) 0, var(--bg) 260px) no-repeat; }
 #toast { background: var(--sidebar); color: var(--sidebar-text); border-radius: 999px; padding: 10px 18px; }
+
+.banner { display: flex; gap: 10px; align-items: flex-start; background: var(--orange-soft); color: var(--text); border-left: 4px solid var(--orange);
+  border-radius: 14px; padding: 12px 16px; margin: 16px 0 0; font-size: 14px; }
+.status-ok { color: var(--ok); font-weight: 600; } .status-bad { color: var(--warn); font-weight: 600; }
+#nav a .i-settings { color: var(--sidebar-muted); }

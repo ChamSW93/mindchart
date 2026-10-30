@@ -4,7 +4,7 @@
 # Running it again is safe: it picks up where it left off and updates an existing install.
 set -e
 REPOSITORY="ChamSW93/mindchart"
-DEST="$HOME/Applications/MindChart"
+DEST="$HOME/Library/Application Support/MindChart/App"  # the code; the app itself goes in Applications
 
 echo ""
 echo "Installing MindChart..."
@@ -51,13 +51,16 @@ curl -fsSL "$RELEASE_URL" -o "$TEMP/MindChart.zip"
 mkdir -p "$DEST"
 unzip -oq "$TEMP/MindChart.zip" -d "$DEST"
 rm -rf "$TEMP"
-chmod +x "$DEST/Start MindChart.command" "$DEST/tools/pdftext" 2> /dev/null || true
-echo "Installed version $(cat "$DEST/VERSION") in $DEST"
+chmod +x "$DEST/Start MindChart.command" "$DEST/tools/pdftext" "$DEST/MindChart.app/Contents/MacOS/MindChart" 2> /dev/null || true
+mkdir -p "$HOME/Applications"
+rm -rf "$HOME/Applications/MindChart.app"
+cp -R "$DEST/MindChart.app" "$HOME/Applications/MindChart.app"
+echo "Installed MindChart $(cat "$DEST/VERSION")"
+SAMPLES="$HOME/Documents/MindChart sample records (fictional)"  # easy to find when testing
+mkdir -p "$SAMPLES" && cp "$DEST/sample-records/"* "$SAMPLES/"
 
-# 5. The AI model that suits this Mac's memory (MindChart's recommendations, largest first).
-if [ "$MEMORY_GB" -ge 24 ]; then MODEL="gpt-oss:20b"
-elif [ "$MEMORY_GB" -ge 16 ]; then MODEL="bonsai-2:27b"
-else MODEL="bonsai-2:9b"; fi
+# 5. The AI model that suits this Mac's memory (MindChart's own recommendation, from models.py).
+MODEL="$(/usr/bin/python3 "$DEST/models.py" --recommended)"
 if ! curl -s http://localhost:11434/api/version > /dev/null; then
   open -a Ollama
   for _ in $(seq 1 30); do curl -s http://localhost:11434/api/version > /dev/null && break; sleep 1; done
@@ -66,12 +69,8 @@ echo ""
 echo "Downloading the AI model ($MODEL). This is several GB and can take a while..."
 "$OLLAMA" pull "$MODEL"
 
-# 6. A shortcut on the Desktop.
-SHORTCUT="$HOME/Desktop/MindChart.command"
-printf '#!/bin/bash\nexec "%s/Start MindChart.command"\n' "$DEST" > "$SHORTCUT"
-chmod +x "$SHORTCUT"
-
 echo ""
-echo "Done! Double-click \"MindChart\" on your Desktop to start."
-echo "The first time, MindChart asks you to choose a password that protects your records."
-echo "Please use only the fictional sample records in $DEST/sample-records while testing."
+echo "Done! MindChart is in your Applications folder (and Launchpad). Opening it now..."
+echo "The first time, it asks for your name and a password that protects your records."
+echo "For testing, use only the fictional sample records in Documents > MindChart sample records (fictional)."
+[ -z "$MINDCHART_NO_OPEN" ] && open "$HOME/Applications/MindChart.app"  # (tests skip opening it)

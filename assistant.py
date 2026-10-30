@@ -37,7 +37,8 @@ patient records for child and adolescent psychiatric evaluations. Today is {toda
 
 Decide what the person wants:
 - "question": they want information from the records. Write ONE SQLite SELECT statement in "sql" using only the
-  views below. Match text with LIKE and % wildcards (it ignores case). Add LIMIT 200. Never change data.
+  views below. To filter by a patient, use their record ID from the list at the end (patient_id = 'PT-...'),
+  never their name. Match other text with LIKE and % wildcards (it ignores case). Add LIMIT 200. Never change data.
 - "new_patient": they want to add a patient. Fill "patient_fields" with what they gave (name is required).
 - "add_note": they're giving information about a patient to record (an observation, event, medication change,
   phone call, incident). Put the patient's ID or name in "patient". Write "note_text" as a clear clinical note in
@@ -50,6 +51,17 @@ describing what you looked up or what you propose to save.
 
 Views you can query (each "id" is a record ID like PT-7K3M9Q; "patient_id" is the patient's record ID):
 {views}
+
+What the columns mean: facts_view.section is the history section a fact belongs to (values below);
+documents_view.document_type is the kind of record (evaluation, IEP, court order...); facts_view.fact is the fact's text.
+To find what the records say about a topic, search facts_view.fact with LIKE.
+
+Examples (with PT-XXXXXX standing for the patient's real record ID from the list below):
+- "What documents does Sam have?" -> SELECT id, name, document_type, document_date FROM documents_view WHERE patient_id = 'PT-XXXXXX' LIMIT 200
+- "Sam's medications" -> SELECT fact, date, document FROM facts_view WHERE patient_id = 'PT-XXXXXX' AND section = 'medications' LIMIT 200
+- "Who has an order of protection?" -> SELECT DISTINCT patient, patient_id, fact FROM facts_view WHERE fact LIKE '%order of protection%' LIMIT 200
+- "How many active patients are there?" -> SELECT COUNT(*) AS active_patients FROM patients_view WHERE status = 'Active'
+- "Facts that aren't verified" -> SELECT patient, section, fact FROM facts_view WHERE verified = 0 LIMIT 200
 
 Fact "section" values: {sections}
 Patient "status" values: Active, Pending, Discharged. Fact "verified" is 1 or 0.
@@ -111,6 +123,8 @@ def handle(message, model, thinking, app_name):
     system = build_prompt(app_name)
     reply = {**empty_reply(), **ask_assistant(model, thinking, system, message)}
     intent, explanation = reply["intent"], reply["explanation"]
+    if intent not in ("new_patient", "add_note", "update_patient") and reply["sql"].strip().lower().startswith(("select", "with")):
+        intent = "question"  # models sometimes label a plain question "unclear" while still writing the right query
 
     if intent == "question":
         try:
@@ -120,6 +134,13 @@ def handle(message, model, thinking, app_name):
                 json.dumps(reply), f"That query failed with: {error}. Write a corrected SELECT using only the views listed.")])
             result = vault.run_query(reply["sql"])
             explanation = reply["explanation"]
+        if not result["rows"] and re.search(r"(name|patient|document|fact|detail)\s*=\s*'", reply["sql"], re.I):
+            # An exact text match that found nothing usually means the wording differs slightly; try once more.
+            retry = history.ask(model, thinking, system, message, SCHEMA, max_tokens=3000, history=[(
+                json.dumps(reply), "That query found no rows because it matched text exactly. Filter patients by their "
+                                   "record ID from the list, and match other text with LIKE '%...%'.")])
+            if retry.get("intent") == "question" and retry.get("sql"):
+                result, reply, explanation = vault.run_query(retry["sql"]), {**reply, **retry}, retry.get("explanation") or explanation
         vault.log("asked a question", None, message[:200])
         return {"kind": "answer", "explanation": explanation, "sql": reply["sql"], **result}
 

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{APP_NAME}}</title>
 <link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="/static/icon.png">
 </head>
 <body>
   <!-- Sign-in: the only thing shown until MindChart is unlocked -->
@@ -13,6 +14,7 @@
       <div class="logo big"></div>
       <h1>{{APP_NAME}}</h1>
       <p class="muted" id="signinIntro"></p>
+      <input type="text" id="userName" autocomplete="name" placeholder="Your name (shown in the activity log)" hidden>
       <input type="password" id="password" autocomplete="current-password" placeholder="Password">
       <input type="password" id="password2" autocomplete="new-password" placeholder="Type it again" hidden>
       <button id="signinBtn" type="submit"></button>

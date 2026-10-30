@@ -10,19 +10,29 @@ if [ -z "$VERSION" ] || [ -z "$NOTES" ]; then
   exit 1
 fi
 
+# Nothing is published unless every test passes on Apple's built-in Python.
+echo "Running tests..."
+if ! scripts/test.sh; then
+  echo "Tests failed, so nothing was published."
+  exit 1
+fi
+
 echo "$VERSION" > VERSION
 
-# The PDF reader is built here (it's a compiled program, so it isn't kept in git).
+# The PDF reader and the Mac app are built here (they're compiled programs, so they aren't kept in git).
 swiftc -O tools/pdftext.swift -o tools/pdftext
+scripts/build_app.sh
 
 # Everything git tracks, minus files only needed for development, plus the built PDF reader.
 git add -A
-FILES=$(git ls-files | grep -v -e '^scripts/' -e '^install.sh$' -e '^\.gitignore$')
+FILES=$(git ls-files | grep -v -e '^scripts/' -e '^tests/' -e '^\.github/' -e '^install.sh$' -e '^\.gitignore$')
 mkdir -p dist
-printf '%s\n' $FILES tools/pdftext MANIFEST | sort > MANIFEST
+APP_FILES=$(find MindChart.app -type f)
+printf '%s\n' $FILES tools/pdftext $APP_FILES MANIFEST | sort > MANIFEST
 rm -f dist/MindChart.zip
 # shellcheck disable=SC2086
 echo "$FILES" | tr '\n' '\0' | xargs -0 zip -q dist/MindChart.zip tools/pdftext MANIFEST
+zip -q -r dist/MindChart.zip MindChart.app
 (cd dist && shasum -a 256 MindChart.zip > MindChart.zip.sha256)
 rm MANIFEST
 
