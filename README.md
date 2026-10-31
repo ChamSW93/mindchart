@@ -89,6 +89,14 @@ MindChart reads the Mac's memory and picks a model that fits the GPU's share of 
 
 macOS "Reduce motion" turns animations off. Other downloaded models can be picked at the bottom of the sidebar, and ones too big for the Mac are labelled. To compare a new model, run it on `sample-records/` first.
 
+**Who makes them.** All run offline; none sends anything to its publisher.
+
+| Model | Publisher | License |
+|---|---|---|
+| gpt-oss:20b | OpenAI | Apache 2.0 |
+| ornith-1.5:9b | Ornith Team ([ornith.ai](https://ornith.ai)), built on Alibaba's Qwen 3.5 | MIT ([model card](https://huggingface.co/ornith-ai/Ornith-1.5-9B)) |
+| bonsai-2:9b | Prism ML ([prismml.com](https://prismml.com)) | Apache 2.0 |
+
 **Models for 16 GB Macs.** A 16 GB Mac gives the GPU about 10.7 GB, which has to hold the model and its working memory. Tested on the five fictional records, scoring 32 key facts known to be in them:
 
 | Model | Key facts found | Caught the planted contradiction | Time* | Memory used |

@@ -17,6 +17,26 @@ Source files (PDF/Word/photos) ──▶ MindChart on this Mac ──▶ Encrypt
 Nothing is sent over the internet. Updates download code only, and never upload anything.
 ```
 
+## AI models
+
+MindChart runs one open-weight AI model, chosen by the Mac's memory and downloaded once through Ollama. A model is a
+file of numbers that runs on the Mac: it doesn't connect to its publisher, and nothing is sent to them. The model can
+be changed at the bottom of MindChart's sidebar.
+
+| Mac memory | Model | Publisher | License | Built on |
+|---|---|---|---|---|
+| 24 GB or more | gpt-oss:20b | OpenAI | Apache 2.0 | (OpenAI's own) |
+| 16 GB | ornith-1.5:9b | Ornith Team, a research group ([ornith.ai](https://ornith.ai), [Hugging Face](https://huggingface.co/ornith-ai/Ornith-1.5-9B)) | MIT | Alibaba's Qwen 3.5 (Apache 2.0) |
+| 8 GB | bonsai-2:9b | Prism ML ([prismml.com](https://prismml.com)) | Apache 2.0 | Qwen 3.5 architecture |
+
+All three licenses allow use within an organization, including commercial use; MIT and Apache 2.0 ask that the copyright
+notice be kept. (Ollama's copy of Ornith leaves out its license text; its publisher's Hugging Face page gives MIT.)
+Licenses and publishers were checked on 10/31/2026. Models from Mistral AI were tested and not chosen; Meta's
+Llama models weren't tested.
+
+Whatever the model, MindChart limits what it can do: facts need a quote found in the source document, drafts and
+cottage briefings cite their sources, and any change to records is a proposal the clinician approves.
+
 ## Technical safeguards (45 CFR §164.312)
 
 | Safeguard | How MindChart meets it | How it's verified |
