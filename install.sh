@@ -16,7 +16,12 @@ if [ "$(uname -m)" != "arm64" ]; then
   exit 1
 fi
 MEMORY_GB=$(( $(sysctl -n hw.memsize) / 1073741824 ))
-echo "This Mac: $(sysctl -n machdep.cpu.brand_string), ${MEMORY_GB} GB memory"
+MACOS="$(sw_vers -productVersion)"
+echo "This Mac: $(sysctl -n machdep.cpu.brand_string), ${MEMORY_GB} GB memory, macOS $MACOS"
+if [ "${MACOS%%.*}" -lt 12 ]; then
+  echo "Sorry, MindChart needs macOS 12 (Monterey) or newer. Update macOS in System Settings, then paste the install line again."
+  exit 1
+fi
 
 # 2. Apple's free command line tools, which include Python.
 if ! xcode-select -p > /dev/null 2>&1; then
@@ -52,9 +57,18 @@ mkdir -p "$DEST"
 unzip -oq "$TEMP/MindChart.zip" -d "$DEST"
 rm -rf "$TEMP"
 chmod +x "$DEST/Start MindChart.command" "$DEST/tools/pdftext" "$DEST/MindChart.app/Contents/MacOS/MindChart" 2> /dev/null || true
-mkdir -p "$HOME/Applications"
-rm -rf "$HOME/Applications/MindChart.app"
-cp -R "$DEST/MindChart.app" "$HOME/Applications/MindChart.app"
+# The app goes in Applications, or in the home folder's Applications if this account can't add apps there.
+APPS="${MINDCHART_APPS:-/Applications}"  # (tests use their own folder)
+WHERE="your Applications folder"
+if [ ! -w "$APPS" ]; then APPS="$HOME/Applications"; WHERE="the Applications folder inside your home folder"; mkdir -p "$APPS"; fi
+rm -rf "$APPS/MindChart.app"
+cp -R "$DEST/MindChart.app" "$APPS/MindChart.app"
+# Earlier versions always used the home folder's Applications; remove that copy so there's only one
+# (but never a development build, which runs a working copy of the code).
+OLD="$HOME/Applications/MindChart.app"
+if [ "$APPS" != "$HOME/Applications" ] && [ -d "$OLD" ] && ! grep -q MindChartHome "$OLD/Contents/Info.plist" 2> /dev/null; then
+  rm -rf "$OLD"
+fi
 echo "Installed MindChart $(cat "$DEST/VERSION")"
 SAMPLES="$HOME/Documents/MindChart sample records (fictional)"  # easy to find when testing
 mkdir -p "$SAMPLES" && cp "$DEST/sample-records/"* "$SAMPLES/"
@@ -70,7 +84,10 @@ echo "Downloading the AI model ($MODEL). This is several GB and can take a while
 "$OLLAMA" pull "$MODEL"
 
 echo ""
-echo "Done! MindChart is in your Applications folder (and Launchpad). Opening it now..."
+echo "Done! MindChart is in $WHERE (and Launchpad). Opening it now..."
 echo "The first time, it asks for your name and a password that protects your records."
 echo "For testing, use only the fictional sample records in Documents > MindChart sample records (fictional)."
-[ -z "$MINDCHART_NO_OPEN" ] && open "$HOME/Applications/MindChart.app"  # (tests skip opening it)
+if [ -z "$MINDCHART_NO_OPEN" ] && ! open "$APPS/MindChart.app"; then  # (tests skip opening it)
+  echo ""
+  echo "MindChart didn't open. Take a screenshot of this window and send it to whoever set MindChart up for you."
+fi

@@ -8,13 +8,13 @@ Everything runs on the Mac. The app, its server and the AI model (through [Ollam
 
 ## Installing
 
-See [TESTING.md](TESTING.md). In short, paste this into Terminal on an Apple Silicon Mac with 16 GB or more:
+See [TESTING.md](TESTING.md). In short, paste this into Terminal on an Apple Silicon Mac with macOS 12 or newer and 16 GB or more:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/ChamSW93/mindchart/main/install.sh | bash
 ```
 
-This puts **MindChart.app** in the Applications folder (and Launchpad), downloads the AI model that suits the Mac, and opens it. MindChart runs in its own window, with no Terminal or browser. Its code lives in `~/Library/Application Support/MindChart/App`.
+This puts **MindChart.app** in the Applications folder (and Launchpad), downloads the AI model that suits the Mac, and opens it. MindChart runs in its own window, with no Terminal or browser. (If the account can't add apps there, it uses the Applications folder in the home folder instead.) Its code lives in `~/Library/Application Support/MindChart/App`. The app and PDF reader are built for macOS 12 and newer, and publishing stops if a build would need anything newer.
 
 **Developing.** `scripts/build_app.sh --dev` builds `~/Applications/MindChart.app` to run this working copy instead. `Start MindChart.command` also still works, and opens MindChart in a browser.
 
@@ -103,7 +103,7 @@ macOS "Reduce motion" turns animations off. Other downloaded models can be picke
 scripts/test.sh
 ```
 
-101 automated tests cover:
+107 automated tests cover:
 - document reading, including OCR of scans, photos, sideways pages and pictures in Word files
 - uploads, patient matching (including the wrong-sibling warning) and learning document types
 - background reading, quote checking and citations, and the drafting flow

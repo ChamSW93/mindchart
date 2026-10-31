@@ -947,10 +947,14 @@ function visitNoteForm(data) {
     form.querySelector(".error").innerHTML = '<span class="thinking"><span class="spinner"></span>Writing it up (on this Mac)…</span>';
     aiBusy(true);
     try {
-      const inputs = [`Visit: ${value("visit_date")}, ${value("visit_type")}`, `Since the last visit: ${value("interval") || "(nothing entered)"}`,
-        `Mental status exam: ${mseText() || "(nothing entered)"}`, `Current medications: ${medsText() || "(not included)"}`,
-        `Scores: ${scoresText() || "(not included)"}`, `Clinician's assessment and plan: ${value("plan") || "(nothing entered)"}`].join("\n");
+      // Only what was entered goes to the AI (smaller models copy placeholders like "(nothing entered)" into the note)
+      const parts = [["Since the last visit", value("interval")], ["Mental status exam", mseText()], ["Current medications", medsText()],
+        ["Scores", scoresText()], ["Clinician's assessment and plan", value("plan")]];
+      const inputs = [`Visit: ${value("visit_date")}, ${value("visit_type")}`, ...parts.filter(([, text]) => text).map(([label, text]) => `${label}: ${text}`)].join("\n");
       const note = await api("POST", `patients/${uid}/visit-note`, { inputs, model: modelChoice() });
+      if (!value("interval")) note.subjective = "Not documented.";
+      if (!mseText() && !medsText() && !scoresText()) note.objective = "Not documented.";
+      if (!value("plan")) note.assessment = note.plan = "Not documented.";
       show([heading(), "", `Subjective: ${note.subjective}`, "", `Objective: ${note.objective}`, "", `Assessment: ${note.assessment}`, "", `Plan: ${note.plan}`].join("\n"));
       form.querySelector(".error").textContent = "";
     } catch (err) {

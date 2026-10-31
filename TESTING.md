@@ -6,7 +6,7 @@ Thank you for trying MindChart! It's an early version, so rough edges are expect
 
 ## What you need
 
-- A Mac with Apple Silicon (M1 or newer) and at least 16 GB of memory
+- A Mac with Apple Silicon (M1 or newer), macOS 12 (Monterey) or newer, and at least 16 GB of memory
 - About 20 GB of free disk space
 - An internet connection for installing (MindChart itself works offline afterwards)
 
@@ -20,7 +20,7 @@ Thank you for trying MindChart! It's an early version, so rough edges are expect
    ```
 
 3. Follow what it says. It may ask you to install Apple's command line tools or Ollama, then run the line again. The AI model download is several GB.
-4. When it says **Done**, MindChart opens. From then on, open it from your **Applications** folder or **Launchpad**, like any app.
+4. When it says **Done**, MindChart opens. From then on, open it from your **Applications** folder or **Launchpad**, like any app. If it says MindChart didn't open, send a screenshot of the Terminal window.
 5. Enter your name and choose a password. Keep the password somewhere safe: if it's lost, your test records can't be recovered, not even by the developer.
 
 Updates install by themselves when you open MindChart. To quit, press ⌘Q; that also locks your records.

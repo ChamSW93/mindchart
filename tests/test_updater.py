@@ -1,6 +1,7 @@
 """Self-updating: version comparison, checksums, and safely swapping in a new release."""
 import hashlib
 import io
+import plistlib
 import tempfile
 import unittest
 import zipfile
@@ -60,6 +61,31 @@ class Updating(unittest.TestCase):
             updater.install(self.serve(release_zip({"VERSION": "0.2.0", "server.py": "x", "../outside.py": "x"})))
         with self.assertRaisesRegex(RuntimeError, "doesn't look like"):
             updater.install(self.serve(release_zip({"readme.txt": "not MindChart"})))
+
+    def test_installed_app_is_refreshed_wherever_it_is(self):
+        plist = lambda **extra: plistlib.dumps({"CFBundleIdentifier": updater.APP_ID, "CFBundleShortVersionString": "0.2.0", **extra})
+        data = release_zip({"VERSION": "0.2.0", "server.py": "new", "MindChart.app/Contents/Info.plist": plist(),
+                            "MindChart.app/Contents/MacOS/MindChart": "new app"})
+        system, home, other, dev = (Path(tempfile.mkdtemp()) for _ in range(4))
+        installed = {}
+        for folder, info in [(system, plist()), (home, plist()), (other, plistlib.dumps({"CFBundleIdentifier": "com.example.other"})),
+                             (dev, plist(MindChartHome="/Users/dev/ClaudeCode"))]:
+            app = folder / "MindChart.app" / "Contents"
+            (app / "MacOS").mkdir(parents=True)
+            (app / "Info.plist").write_bytes(info)
+            (app / "MacOS" / "MindChart").write_text("old app")
+            installed[folder] = app / "MacOS" / "MindChart"
+        real_folders = updater.APP_FOLDERS
+        updater.APP_FOLDERS = [system, home, other, dev]
+        try:
+            updater.install(self.serve(data))
+        finally:
+            updater.APP_FOLDERS = real_folders
+        self.assertEqual(installed[system].read_text(), "new app")
+        self.assertEqual(installed[home].read_text(), "new app")
+        self.assertEqual(installed[other].read_text(), "old app")  # another app with the same name is left alone
+        self.assertEqual(installed[dev].read_text(), "old app")  # and so is a development build
+        self.assertFalse((system / ".MindChart.app.new").exists())
 
     def test_development_copy_never_updates(self):
         (self.folder / ".git").mkdir()

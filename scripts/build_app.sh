@@ -23,7 +23,9 @@ iconutil -c icns "$WORK/AppIcon.iconset" -o "$WORK/AppIcon.icns"
 sips -z 128 128 "$WORK/icon.png" --out static/icon.png > /dev/null  # also used as the web page's icon
 
 echo "Building the app..."
-swiftc -O tools/MindChartApp.swift -o "$WORK/MindChart" -framework Cocoa -framework WebKit
+# Without a target, swiftc builds for this Mac's own macOS version, and older Macs refuse to open the app
+MACOS_MIN=12.0
+swiftc -O -target "arm64-apple-macos$MACOS_MIN" tools/MindChartApp.swift -o "$WORK/MindChart" -framework Cocoa -framework WebKit
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -41,7 +43,7 @@ cat > "$APP/Contents/Info.plist" << EOF
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$(cat VERSION)</string>
   <key>CFBundleVersion</key><string>$(cat VERSION)</string>
-  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSMinimumSystemVersion</key><string>$MACOS_MIN</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.medical</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>

@@ -19,9 +19,16 @@ fi
 
 echo "$VERSION" > VERSION
 
-# The PDF reader and the Mac app are built here (they're compiled programs, so they aren't kept in git).
-swiftc -O tools/pdftext.swift -o tools/pdftext
+# The PDF reader and the Mac app are built here (they're compiled programs, so they aren't kept in git),
+# for macOS 12 and newer, not just this Mac's version.
+swiftc -O -target arm64-apple-macos12.0 tools/pdftext.swift -o tools/pdftext
 scripts/build_app.sh
+for program in tools/pdftext MindChart.app/Contents/MacOS/MindChart; do
+  if [ "$(otool -l "$program" | awk '/minos/ { print $2; exit }')" != "12.0" ]; then
+    echo "$program would only run on a newer macOS than 12, so nothing was published."
+    exit 1
+  fi
+done
 
 # Everything git tracks, minus files only needed for development, plus the built PDF reader.
 git add -A

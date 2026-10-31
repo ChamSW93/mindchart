@@ -172,10 +172,72 @@ class MedicationsAndNotes(unittest.TestCase):
         self.assertEqual(found[0]["source"], "note.pdf (08/02/2024)")
         self.assertEqual(history.suggest_medications("m", False, []), [])
 
+    def test_entries_for_the_same_medication_are_combined(self):
+        # What ornith-1.5:9b returned for the sample records: one entry per fact, with guanfacine three times
+        entry = lambda name, dose, status, start, response, fact, stop="", reason="": {
+            "name": name, "dose": dose, "frequency": "at bedtime", "target": "hyperactivity" if fact == 4 else "", "status": status,
+            "start_date": start, "stop_date": stop, "stop_reason": reason, "response": response, "facts": [fact]}
+        history.ask = lambda *a, **k: {"medications": [
+            entry("Guanfacine ER", "2 mg", "Active", "05/01/2024", "Changed to guanfacine ER 2 mg on 05/01/2024", 2),
+            entry("Methylphenidate (Ritalin)", "10 mg", "Stopped", "2018", "", 3, "2019", "poor appetite and weight loss"),
+            entry("Guanfacine", "1 mg", "Active", "2021", "Partial benefit for hyperactivity", 4),
+            entry("Guanfacine", "1 mg", "Active", "", "", 5)]}
+        note, evaluation = ("progress.pdf", "08/02/2024"), ("evaluation.pdf", "09/18/2023")
+        facts = [{"fact": f"Fact {n}", "date": "", "document": doc, "document_date": day}
+                 for n, (doc, day) in enumerate([note, note, evaluation, evaluation, evaluation], 1)]
+        found = history.suggest_medications("m", False, facts)
+        self.assertEqual([m["name"] for m in found], ["Guanfacine ER", "Methylphenidate (Ritalin)"])
+        guanfacine = found[0]
+        self.assertEqual((guanfacine["dose"], guanfacine["status"], guanfacine["start_date"], guanfacine["target"]),
+                         ("2 mg", "Active", "2021", "hyperactivity"))  # the newest record gives the dose; the oldest the start
+        self.assertEqual(guanfacine["response"], "Partial benefit for hyperactivity; Changed to guanfacine ER 2 mg on 05/01/2024")
+        self.assertEqual(guanfacine["source"], "evaluation.pdf (09/18/2023); progress.pdf (08/02/2024)")
+        self.assertEqual(guanfacine["quotes"], ["Fact 4", "Fact 5", "Fact 2"])
+        self.assertEqual((found[1]["stop_date"], found[1]["stop_reason"]), ("2019", "poor appetite and weight loss"))
+
+    def test_how_often_is_taken_out_of_the_dose(self):
+        # What bonsai-2:9b returned: the frequency inside the dose
+        entry = lambda dose, frequency: {"name": "Guanfacine ER", "dose": dose, "frequency": frequency, "target": "",
+                                         "status": "Active", "start_date": "", "stop_date": "", "stop_reason": "", "response": "",
+                                         "facts": [1]}
+        facts = [{"fact": "Guanfacine ER 2 mg at bedtime.", "date": "", "document": "note.pdf", "document_date": "08/02/2024"}]
+        for dose, frequency, expected in [("2 mg at bedtime", "", ("2 mg", "at bedtime")), ("0.5 mg twice daily", "", ("0.5 mg", "twice daily")),
+                                          ("2 mg at bedtime", "nightly", ("2 mg at bedtime", "nightly")), ("2 mg", "", ("2 mg", ""))]:
+            history.ask = lambda *a, **k: {"medications": [entry(dose, frequency)]}
+            found = history.suggest_medications("m", False, facts)[0]
+            self.assertEqual((found["dose"], found["frequency"]), expected)
+
+    def test_medication_names_match_across_formulations(self):
+        key = history.medication_key
+        self.assertEqual(key("Guanfacine ER"), key("guanfacine"))
+        self.assertEqual(key("Methylphenidate (Ritalin)"), key("methylphenidate"))
+        self.assertEqual(key("Sertraline 50 mg tablets"), "sertraline")
+        self.assertNotEqual(key("Vitamin D"), key("Vitamin B12"))
+
     def test_visit_notes_have_four_parts(self):
         history.ask = lambda *a, **k: {"subjective": "S", "objective": "O", "assessment": "A", "plan": "P"}
         self.assertEqual(history.draft_visit_note("m", False, "Since last visit: better"), {"subjective": "S", "objective": "O",
                                                                                         "assessment": "A", "plan": "P"})
+
+    def test_the_plan_is_not_repeated_in_the_assessment(self):
+        history.ask = lambda *a, **k: {"subjective": "Not documented.", "objective": "Not documented.",
+                                       "assessment": "Anxiety improving. Continue sertraline. Follow up in 1 month.",
+                                       "plan": "Continue sertraline. Follow up in 1 month."}
+        self.assertEqual(history.draft_visit_note("m", False, "Plan: continue sertraline")["assessment"], "Anxiety improving.")
+        history.ask = lambda *a, **k: {"subjective": "S", "objective": "O", "assessment": "Follow up in 1 month.",
+                                       "plan": "Follow up in 1 month."}
+        self.assertEqual(history.draft_visit_note("m", False, "Plan: follow up")["assessment"], "Not documented.")
+
+    def test_actions_in_the_assessment_move_to_the_plan(self):
+        # What bonsai-2:9b did with "Continue current medications. Follow up in 1 month."
+        history.ask = lambda *a, **k: {"subjective": "S", "objective": "O", "assessment": "Continue current medications.",
+                                       "plan": "Follow up in 1 month."}
+        note = history.draft_visit_note("m", False, "Plan: continue meds, follow up")
+        self.assertEqual((note["assessment"], note["plan"]), ("Not documented.", "Continue current medications. Follow up in 1 month."))
+        history.ask = lambda *a, **k: {"subjective": "S", "objective": "O", "plan": "Not documented.",
+                                       "assessment": "Continued improvement in sleep. Increase sertraline to 75 mg daily."}
+        note = history.draft_visit_note("m", False, "Plan: increase sertraline")
+        self.assertEqual((note["assessment"], note["plan"]), ("Continued improvement in sleep.", "Increase sertraline to 75 mg daily."))
 
 
 class FillingFields(unittest.TestCase):

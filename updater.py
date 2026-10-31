@@ -11,6 +11,7 @@ not in the app folder. Nothing is ever uploaded; this only downloads.
 import hashlib
 import io
 import json
+import plistlib
 import shutil
 import sys
 import tempfile
@@ -22,6 +23,8 @@ HERE = Path(__file__).parent
 REPOSITORY = "ChamSW93/mindchart"  # where releases are published
 ASSET = "MindChart.zip"
 KEEP = {"update.json"}  # local files an update must never overwrite
+APP_ID = "io.github.chamsw93.mindchart"
+APP_FOLDERS = [Path("/Applications"), Path.home() / "Applications"]  # where the installer may have put the app
 
 
 def current_version():
@@ -87,10 +90,31 @@ def install(release):
         if (HERE / executable).exists():
             (HERE / executable).chmod(0o755)
     # The app in Applications is a copy; refresh it too, so changes to the app itself reach everyone.
-    installed_app = Path.home() / "Applications" / "MindChart.app"
-    if (HERE / "MindChart.app").is_dir() and installed_app.is_dir():
-        shutil.rmtree(installed_app)
-        shutil.copytree(HERE / "MindChart.app", installed_app)
+    if (HERE / "MindChart.app").is_dir():
+        for folder in APP_FOLDERS:
+            installed_app = folder / "MindChart.app"
+            if not is_mindchart(installed_app):
+                continue
+            fresh = folder / ".MindChart.app.new"  # copied first, so a failed copy leaves the old app working
+            try:
+                shutil.rmtree(fresh, ignore_errors=True)
+                shutil.copytree(HERE / "MindChart.app", fresh)
+                shutil.rmtree(installed_app)
+                fresh.rename(installed_app)
+            except OSError as error:
+                shutil.rmtree(fresh, ignore_errors=True)
+                print(f"Couldn't refresh {installed_app}: {error}")
+
+
+def is_mindchart(app):
+    """Whether a folder is an installed MindChart app: not something else with the same name, and not a
+    development build (which runs a working copy of the code)."""
+    try:
+        with open(app / "Contents" / "Info.plist", "rb") as f:
+            info = plistlib.load(f)
+    except (OSError, ValueError):
+        return False
+    return info.get("CFBundleIdentifier") == APP_ID and "MindChartHome" not in info
 
 
 def main():

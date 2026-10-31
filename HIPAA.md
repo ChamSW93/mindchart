@@ -41,7 +41,7 @@ Nothing is sent over the internet. Updates download code only, and never upload 
 - **Error logs contain no record contents.** `~/Library/Logs/MindChart` records what failed and where in the code, so it's safe to send to the developer.
 - **Updates are code-only and verified.** Updates download from GitHub over HTTPS, are checked against a published SHA-256 checksum, replace only the app's files, and never touch the encrypted store. They never upload anything.
 - **Deleting is thorough.** Deleting a patient removes their documents, facts and drafts, and the database is rewritten so deleted records don't linger in free space.
-- **Tested before every release.** An automated test suite (101 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
+- **Tested before every release.** An automated test suite (107 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
 
 ## What the organization is responsible for
 

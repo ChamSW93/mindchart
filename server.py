@@ -327,9 +327,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return {"events": vault.timeline(args[0])}
         if is_("POST", "patients", "*", "medications", "suggest"):  # a medication list drafted from the records
             model, thinking = model_choice(data)
-            have = {m["name"].lower() for m in vault.list_records("medications", patient_uid=args[0])["rows"]}
+            have = {history.medication_key(m["name"]) for m in vault.list_records("medications", patient_uid=args[0])["rows"]}
             suggestions = history.suggest_medications(model, thinking, vault.medication_facts(args[0]))
-            return {"suggestions": [m for m in suggestions if m["name"].lower() not in have]}
+            return {"suggestions": [m for m in suggestions if history.medication_key(m["name"]) not in have]}
         if is_("POST", "patients", "*", "visit-note"):  # a visit note drafted from the clinician's own notes
             model, thinking = model_choice(data)
             vault.internal("patients", args[0])  # the patient must exist

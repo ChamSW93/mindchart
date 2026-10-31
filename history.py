@@ -317,17 +317,47 @@ def suggest_medications(model, thinking, facts):
         "required": ["name", "dose", "frequency", "target", "status", "start_date", "stop_date", "stop_reason", "response", "facts"]}}},
         "required": ["medications"]}
     reply = ask(model, thinking, MEDICATIONS_PROMPT, f"Facts:\n{numbered}", schema, max_tokens=4000)
-    suggestions = []
+    # Smaller models sometimes list each fact as its own entry, so entries for the same medication are combined here:
+    # the most recent record gives the current name, dose and status, and the earlier ones add to the history.
+    trials = {}
     for item in reply.get("medications", []):
         cited = [facts[n - 1] for n in item.get("facts", []) if 0 < n <= len(facts)]
         if not item.get("name", "").strip() or not cited:
             continue  # every suggestion must come from the records
+        newest = max(fieldtypes.date_key(f["document_date"] or f["date"]) or (0, 0, 0) for f in cited)
+        trials.setdefault(medication_key(item["name"]), []).append((newest, item, cited))
+    suggestions = []
+    for entries in trials.values():
+        entries.sort(key=lambda e: e[0])
+        items = [item for _, item, _ in entries]
+        latest = lambda key: next((i[key] for i in reversed(items) if i.get(key, "").strip()), "")
+        cited = list({id(f): f for _, _, c in entries for f in c}.values())
+        status = items[-1].get("status") if items[-1].get("status") in ("Active", "Stopped") else ""
+        starts = [i["start_date"] for i in items if i.get("start_date", "").strip()]
         sources = list(dict.fromkeys(f"{f['document']}{' (' + f['document_date'] + ')' if f['document_date'] else ''}" for f in cited))
-        suggestions.append({**{k: item.get(k, "") for k in ("name", "dose", "frequency", "target", "start_date", "stop_date",
-                                                              "stop_reason", "response")},
-                            "status": item["status"] if item.get("status") in ("Active", "Stopped") else "",
-                            "source": "; ".join(sources), "quotes": [f["fact"] for f in cited]})
+        dose, frequency = latest("dose"), latest("frequency")
+        split = re.fullmatch(r"\s*([\d.,]+\s*(?:mg|mcg|g|ml|mL|units?)\b)\s+(.+?)\s*", dose)
+        if split and not frequency:  # smaller models put how often in the dose: "2 mg at bedtime"
+            dose, frequency = split.groups()
+        suggestions.append({"name": items[-1]["name"], "dose": dose, "frequency": frequency,
+                            "target": latest("target"),
+                            "start_date": min(starts, key=lambda d: fieldtypes.date_key(d) or (9999, 0, 0)) if starts else "",
+                            "stop_date": latest("stop_date") if status != "Active" else "",
+                            "stop_reason": latest("stop_reason") if status != "Active" else "",
+                            "response": "; ".join(dict.fromkeys(i["response"].strip() for i in items if i.get("response", "").strip())),
+                            "status": status, "source": "; ".join(sources), "quotes": [f["fact"] for f in cited]})
     return suggestions
+
+
+FORMULATIONS = {"er", "xr", "xl", "sr", "cr", "la", "ir", "dr", "odt", "extended", "immediate", "delayed", "release",
+                "tablet", "tablets", "capsule", "capsules", "oral", "liquid", "solution", "mg", "mcg", "ml"}
+
+
+def medication_key(name):
+    """What identifies a medication across records: "Guanfacine ER" and "guanfacine" are the same medication,
+    and so are "Methylphenidate (Ritalin)" and "methylphenidate"."""
+    words = re.split(r"[^a-z0-9]+", re.sub(r"\([^)]*\)", " ", name.lower()))
+    return " ".join(w for w in words if w and w not in FORMULATIONS and not re.fullmatch(r"[\d.]+", w)) or name.strip().lower()
 
 
 NOTE_PROMPT = """You help a child and adolescent psychiatric nurse practitioner write up a visit. Write the note from ONLY
@@ -338,7 +368,8 @@ visit), "objective" (the mental status exam as written, then current medications
 - Keep every detail given: names, doses, dates, scores, quotes.
 - Clear, concise clinical prose in the third person, referring to the patient as "the patient" or by first name.
 - The clinician may write assessment and plan together: put their clinical impression in "assessment" and the actions
-  (medications, monitoring, follow-up) in "plan", without repeating anything between the two.
+  (medications, monitoring, follow-up) in "plan", without repeating anything between the two. If they give only
+  actions and no clinical impression, "assessment" is "Not documented."
 - Don't start a part with its own label (no "Subjective:" or "Since the last visit:").
 - If a part has nothing in the notes, write "Not documented." for it."""
 
@@ -349,7 +380,22 @@ def draft_visit_note(model, thinking, inputs):
     part = {"type": "string", "maxLength": 4000}
     schema = {"type": "object", "properties": {"subjective": part, "objective": part, "assessment": part, "plan": part},
               "required": ["subjective", "objective", "assessment", "plan"]}
-    return ask(model, thinking, NOTE_PROMPT, inputs, schema, max_tokens=4000)
+    note = ask(model, thinking, NOTE_PROMPT, inputs, schema, max_tokens=4000)
+    # Smaller models sometimes copy the plan into the assessment, or put some of its actions there
+    sentences = lambda text: [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s]
+    key = lambda sentence: re.sub(r"\W+", " ", sentence).strip().lower()
+    in_plan = {key(s) for s in sentences(note.get("plan", ""))}
+    assessment = [s for s in sentences(note.get("assessment", "")) if key(s) not in in_plan]
+    actions = [s for s in assessment if PLAN_ACTION.match(s)]
+    plan = note.get("plan", "").strip()
+    note["assessment"] = " ".join(s for s in assessment if s not in actions) or "Not documented."
+    note["plan"] = " ".join(actions + ([plan] if plan and plan != "Not documented." else [])) or plan or "Not documented."
+    return note
+
+
+# Sentences that are actions, so they belong in the plan ("Continue sertraline", not "Continued improvement")
+PLAN_ACTION = re.compile(r"(continue|start|begin|initiate|increase|decrease|reduce|stop|discontinue|hold|resume|taper|titrate|"
+                         r"recheck|repeat|follow[ -]up|refer|schedule|monitor|obtain|update)\s", re.I)
 
 
 def extract_facts(model, thinking, doc, chunk):
