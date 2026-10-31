@@ -38,13 +38,22 @@ MindChart starts with a short tour of each part of the app. Take it (or skip it,
 4. Watch the bottom left of the sidebar: confirmed documents are read in the background. You can keep working meanwhile.
 5. On Jordan's page, click **Build history**. Documents already read are reused, so it's quicker than before. Review the draft: check the citations, the red "disagree" boxes, and **Export to Word**.
 6. Open the court order, IEP and psychological evaluation from the patient's page. Check the details the AI filled in (marked **✦ AI**, with the quote it came from) and correct one with **Edit**. Changing a document's type teaches MindChart too.
-7. In the bar at the top, try:
+7. On Jordan's page, try the newer parts:
+   - **Suggest from records** under Medications, then add the ones that are right and set their consent.
+   - **+ Add a score or vitals**: a few PHQ-A scores on different dates, to see the chart.
+   - **+ Add follow-up**, then look at **Coming up** on Home.
+   - Open the **Timeline**.
+   - **Write visit note**: type a few lines, click through the mental status exam, add a plan, and **Draft the note with AI**. Try **Copy**.
+8. In the bar at the top, try:
    - *Which patients have an order of protection?*
    - *Which cottage is Jordan in?*
    - *Add a note for Jordan: had a calm week, no incidents, sleeping 8 hours*
    - *Change Jordan's status to Discharged*
-8. Browse **Patients**, **Documents** and **Facts**, open a record and **Edit** it.
-9. Click **Lock MindChart**, then sign back in.
+   - *Jordan's PHQ-A was 11 today*
+   - *Remind me to renew Jordan's medication consent by 12/01*
+   - *Who is on sertraline?*
+9. Browse **Patients**, **Documents** and **Facts**, open a record and **Edit** it.
+10. Click **Lock MindChart**, then sign back in.
 
 ## Feedback
 
@@ -54,6 +63,7 @@ Notes on any of these help:
 - Facts the draft got wrong or missed
 - Uploads whose type or patient MindChart got wrong
 - Whether the tour and the ? help were clear, and anything they didn't explain
+- Whether visit notes, medications, scores and follow-ups match how you actually work, and what's missing
 - Whether the draft would save you time, and what would make it more useful
 - Which version you're on (shown at the bottom left)
 - If something breaks: the error log in `~/Library/Logs/MindChart` (it never contains record contents)

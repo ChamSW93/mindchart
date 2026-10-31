@@ -17,10 +17,16 @@ import vault
 PATIENT_FIELDS = [f["name"] for f in vault.OBJECTS["patients"]["fields"] if f.get("edit", True)] + list(dict.fromkeys(
     d["name"] for defs in fieldtypes.DEFAULT_RECORD_TYPES["patients"].values() for d in defs))
 
+# Medications, measures and follow-ups logged from the command bar: {intent: (object, fields the model can fill)}.
+ITEMS = {"add_medication": ("medications", ["name", "dose", "frequency", "start_date"]),
+         "add_measure": ("measures", ["measure", "score", "date"]),
+         "add_follow_up": ("follow_ups", ["title", "due", "category"])}
+ITEM_FIELDS = list(dict.fromkeys(f for _, names in ITEMS.values() for f in names))
+
 SCHEMA = {
     "type": "object",
     "properties": {
-        "intent": {"type": "string", "enum": ["question", "new_patient", "add_note", "update_patient", "unclear"]},
+        "intent": {"type": "string", "enum": ["question", "new_patient", "add_note", "update_patient", *ITEMS, "unclear"]},
         "sql": {"type": "string", "maxLength": 1500},
         "explanation": {"type": "string", "maxLength": 400},
         "patient": {"type": "string", "maxLength": 120},
@@ -31,8 +37,10 @@ SCHEMA = {
         },
         "note_text": {"type": "string", "maxLength": 4000},
         "note_date": {"type": "string", "maxLength": 30},
+        "item": {"type": "object", "properties": {name: {"type": "string", "maxLength": 300} for name in ITEM_FIELDS},
+                 "required": ITEM_FIELDS},
     },
-    "required": ["intent", "sql", "explanation", "patient", "patient_fields", "note_text", "note_date"],
+    "required": ["intent", "sql", "explanation", "patient", "patient_fields", "note_text", "note_date", "item"],
 }
 
 PROMPT = """You are the assistant inside {app}, a private, offline app a psychiatric nurse practitioner uses to keep
@@ -50,6 +58,15 @@ Decide what the person wants:
   the third person keeping every detail they gave and adding nothing. "note_date" is the date they mention, else "".
 - "update_patient": they want to change a patient's details (status, placement, guardian, admission date, etc.).
   Put the patient in "patient" and only the changed values in "patient_fields".
+- "add_medication": they want a medication on a patient's medication list ("Jordan started guanfacine 1 mg at bedtime
+  today", "Add sertraline 50 mg daily to Maria's medications"). Fill "item": name, dose, frequency, start_date.
+  If they ask for a note, it's "add_note" instead.
+- "add_measure": they give a rating scale score or vitals ("Jordan's PHQ-A was 14 today"). Fill "item": measure (one
+  of: {measures}), score, date.
+- "add_follow_up": something to do or remember for a patient, usually by a date ("Remind me to renew Jordan's
+  medication consent by 12/01"). Fill "item": title (what to do), due, category (one of: Court, School / IEP,
+  Medication / labs, Consent, Appointment, Other).
+For these three, put the patient in "patient", and write dates as MM/DD/YYYY ("today" is {today}).
 - "unclear": you can't tell. Say what you need in "explanation".
 Use "" for every field that doesn't apply. "explanation" is one short plain-English sentence for the person,
 describing what you looked up or what you propose to save.
@@ -63,7 +80,11 @@ To find what the records say about a topic, search facts_view.fact with LIKE.
 
 Examples (with PT-XXXXXX standing for the patient's real record ID from the list below):
 - "What documents does Sam have?" -> SELECT id, name, document_type, document_date FROM documents_view WHERE patient_id = 'PT-XXXXXX' LIMIT 200
-- "Sam's medications" -> SELECT fact, date, document FROM facts_view WHERE patient_id = 'PT-XXXXXX' AND section = 'medications' LIMIT 200
+- "Sam's medications" -> SELECT name, dose, frequency, status, consent FROM medications_view WHERE patient_id = 'PT-XXXXXX' LIMIT 200
+- "Who is on sertraline?" -> SELECT patient, patient_id, name, dose, frequency FROM medications_view WHERE name LIKE '%sertraline%' AND status = 'Active' LIMIT 200
+- "What do Sam's records say about medications?" -> SELECT fact, date, document FROM facts_view WHERE patient_id = 'PT-XXXXXX' AND section = 'medications' LIMIT 200
+- "Sam's PHQ-A scores" -> SELECT date, score FROM measures_view WHERE patient_id = 'PT-XXXXXX' AND measure LIKE 'PHQ-A%' LIMIT 200
+- "What follow-ups are open?" -> SELECT patient, patient_id, title, due, category FROM follow_ups_view WHERE status = 'Open' LIMIT 200
 - "Who has an order of protection?" -> SELECT DISTINCT patient, patient_id, fact FROM facts_view WHERE fact LIKE '%order of protection%' LIMIT 200
 - "How many active patients are there?" -> SELECT COUNT(*) AS active_patients FROM patients_view WHERE status = 'Active'
 - "Facts that aren't verified" -> SELECT patient, section, fact FROM facts_view WHERE verified = 0 LIMIT 200
@@ -99,7 +120,8 @@ def build_prompt(app_name):
         + (", ".join(f"{d['name']} ({d['type']}{': ' + '/'.join(d['options']) if d['options'] else ''})" for d in defs) or "no own fields")
         for obj, types in vault.field_definitions().items() for rt, defs in types.items())
     return PROMPT.format(app=app_name, today=datetime.date.today().strftime("%m/%d/%Y"), views=views,
-                         sections=", ".join(vault.SECTIONS), patients=patients, record_types=record_types)
+                         sections=", ".join(vault.SECTIONS), patients=patients, record_types=record_types,
+                         measures=", ".join(vault.record_type_names("measures")))
 
 
 def find_patient(reference):
@@ -117,7 +139,7 @@ def find_patient(reference):
 
 def empty_reply():
     return {"intent": "unclear", "sql": "", "explanation": "", "patient": "", "note_text": "", "note_date": "",
-            "patient_fields": {name: "" for name in PATIENT_FIELDS}}
+            "patient_fields": {name: "" for name in PATIENT_FIELDS}, "item": {name: "" for name in ITEM_FIELDS}}
 
 
 def ask_assistant(model, thinking, system, message):
@@ -139,7 +161,7 @@ def handle(message, model, thinking, app_name):
     system = build_prompt(app_name)
     reply = {**empty_reply(), **ask_assistant(model, thinking, system, message)}
     intent, explanation = reply["intent"], reply["explanation"]
-    if intent not in ("new_patient", "add_note", "update_patient") and reply["sql"].strip().lower().startswith(("select", "with")):
+    if intent not in ("new_patient", "add_note", "update_patient", *ITEMS) and reply["sql"].strip().lower().startswith(("select", "with")):
         intent = "question"  # models sometimes label a plain question "unclear" while still writing the right query
 
     if intent == "question":
@@ -166,7 +188,7 @@ def handle(message, model, thinking, app_name):
             return {"kind": "message", "text": "What's the new patient's name?"}
         return {"kind": "proposal", "action": "new_patient", "summary": explanation, "fields": fields}
 
-    if intent in ("add_note", "update_patient"):
+    if intent in ("add_note", "update_patient", *ITEMS):
         matches = find_patient(reply["patient"])
         if not matches:
             return {"kind": "message", "text": f"I couldn't find a patient matching \"{reply['patient']}\". "
@@ -180,6 +202,8 @@ def handle(message, model, thinking, app_name):
                 return {"kind": "message", "text": "What should the note say?"}
             return {"kind": "proposal", "action": "add_note", "summary": explanation, "patient": patient,
                     "fields": {"text": reply["note_text"].strip(), "date": reply["note_date"].strip()}}
+        if intent in ITEMS:
+            return item_proposal(intent, reply, explanation, patient)
         if fields.get("name") == patient["name"]:  # the model often repeats the name; it isn't a change
             del fields["name"]
         if not fields:
@@ -187,6 +211,19 @@ def handle(message, model, thinking, app_name):
         return {"kind": "proposal", "action": "update_patient", "summary": explanation, "patient": patient, "fields": fields}
 
     return {"kind": "message", "text": explanation or "Sorry, I didn't understand. Try asking a question or describing what to log."}
+
+
+def item_proposal(intent, reply, explanation, patient):
+    """A medication, measure or follow-up to check before saving."""
+    obj, names = ITEMS[intent]
+    item = {k: str(v).strip() for k, v in (reply.get("item") or {}).items() if k in names and str(v).strip()}
+    if obj == "measures":  # "PHQ-A" -> "PHQ-A (depression)"
+        wanted = item.get("measure", "").lower()
+        item["measure"] = next((t for t in vault.record_type_names("measures") if wanted and t.lower().startswith(wanted.split(" (")[0])), "")
+    title = vault.OBJECTS[obj]["title_field"]
+    if not item.get(title):
+        return {"kind": "message", "text": f"What's the {vault.OBJECTS[obj]['label'].lower()}? Try including its name."}
+    return {"kind": "proposal", "action": intent, "object": obj, "summary": explanation, "patient": patient, "fields": item}
 
 
 def confirm(proposal):
@@ -203,4 +240,9 @@ def confirm(proposal):
     if action == "update_patient":
         vault.update_record("patients", patient_uid, fields)
         return {"kind": "done", "object": "patients", "id": patient_uid, "text": f"Updated {proposal['patient']['name']}."}
+    if action in ITEMS:
+        obj = ITEMS[action][0]
+        uid = vault.create_record(obj, fields, patient_uid)
+        return {"kind": "done", "object": obj, "id": uid,
+                "text": f"Added the {vault.OBJECTS[obj]['label'].lower()} to {proposal['patient']['name']}'s record ({uid})."}
     raise ValueError("Unknown action")

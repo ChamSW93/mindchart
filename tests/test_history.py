@@ -40,6 +40,11 @@ class Citations(unittest.TestCase):
                                       self.facts, [])
         self.assertEqual(text, "Born preterm. [D1 p.3] Has an IEP. [D2; D1 p.3]")
 
+    def test_fact_numbers_the_model_writes_are_removed(self):
+        text = history.join_sentences([{"text": "Has a behavior plan (fact 1).", "facts": [1]},
+                                       {"text": "Visits are suspended (facts 1 and 2).", "facts": [2]}], self.facts, [])
+        self.assertEqual(text, "Has a behavior plan. [D1 p.3] Visits are suspended. [D2]")
+
     def test_unknown_fact_numbers_are_flagged(self):
         self.assertEqual(history.join_sentences([{"text": "Something.", "facts": [9]}], self.facts, []), "Something. [no source]")
 
@@ -146,6 +151,31 @@ class ReadingOneDocument(unittest.TestCase):
         history.ask = unavailable
         with self.assertRaises(history.AIUnavailable):
             list(history.read_document(self.doc(), "D1", "m", False))
+
+
+class MedicationsAndNotes(unittest.TestCase):
+    def setUp(self):
+        self.real_ask = history.ask
+
+    def tearDown(self):
+        history.ask = self.real_ask
+
+    def test_suggested_medications_must_cite_the_records(self):
+        history.ask = lambda *a, **k: {"medications": [
+            {"name": "Sertraline", "dose": "50 mg", "frequency": "daily", "target": "", "status": "Active", "start_date": "05/01/2024",
+             "stop_date": "", "stop_reason": "", "response": "", "facts": [1]},
+            {"name": "Made Up", "dose": "", "frequency": "", "target": "", "status": "Unknown", "start_date": "", "stop_date": "",
+             "stop_reason": "", "response": "", "facts": [7]}]}
+        facts = [{"fact": "Sertraline was increased to 50 mg daily.", "date": "06/01/2024", "document": "note.pdf", "document_date": "08/02/2024"}]
+        found = history.suggest_medications("m", False, facts)
+        self.assertEqual([m["name"] for m in found], ["Sertraline"])  # the second cites a fact that doesn't exist
+        self.assertEqual(found[0]["source"], "note.pdf (08/02/2024)")
+        self.assertEqual(history.suggest_medications("m", False, []), [])
+
+    def test_visit_notes_have_four_parts(self):
+        history.ask = lambda *a, **k: {"subjective": "S", "objective": "O", "assessment": "A", "plan": "P"}
+        self.assertEqual(history.draft_visit_note("m", False, "Since last visit: better"), {"subjective": "S", "objective": "O",
+                                                                                        "assessment": "A", "plan": "P"})
 
 
 class FillingFields(unittest.TestCase):

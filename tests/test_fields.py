@@ -45,5 +45,19 @@ class Converting(unittest.TestCase):
         self.assertEqual(fields.convert("84", f("number")), (84, True))
 
 
+class DatesAndScores(unittest.TestCase):
+    def test_partial_dates_still_sort(self):
+        self.assertEqual(fields.date_key("03/04/2019"), (2019, 3, 4))
+        self.assertEqual(fields.date_key("March 2019"), (2019, 3, 0))
+        self.assertEqual(fields.date_key("sometime in 2018"), (2018, 0, 0))
+        self.assertIsNone(fields.date_key("at age 7"))
+
+    def test_published_score_bands(self):
+        self.assertEqual(fields.measure_band("PHQ-A (depression)", 12), "Moderate")
+        self.assertEqual(fields.measure_band("GAD-7 (anxiety)", 4), "Minimal")
+        self.assertEqual(fields.measure_band("CRAFFT (substance use)", 2), "Positive screen (2 or more)")
+        self.assertEqual(fields.measure_band("Vitals", 100), "")
+
+
 if __name__ == "__main__":
     unittest.main()

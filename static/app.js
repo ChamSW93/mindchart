@@ -3,15 +3,18 @@
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = { session: null, objects: null, sectionTitles: {}, models: [], dirtyDraft: false, work: {}, uploads: null };
-const ICONS = { patients: "i-patients", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity" };
-const PREFIXES = { PT: "patients", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity" };
+const ICONS = { patients: "i-patients", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity",
+  medications: "i-meds", measures: "i-measures", follow_ups: "i-follow" };
+const PREFIXES = { PT: "patients", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity", MED: "medications",
+  MSR: "measures", FUP: "follow_ups" };
 const HIDDEN_COLUMNS = ["patient_id", "document_id", "notes", "quote", "read_by_model", "seq", "details", "read_state"];
 const READ_STATES = { queued: "Waiting to be read", fields: "Updating details", read: "Read", failed: "Couldn't read" };
 const EXAMPLES = [
   "Which patients have an order of protection?",
-  "List current medications for each active patient",
+  "Who is on sertraline?",
   "Show facts that aren't verified yet",
-  "New patient: Maria Lopez, DOB 03/04/2012, placement Cottage 4",
+  "Remind me to renew Jordan's medication consent by 12/01",
+  "Jordan's PHQ-A was 11 today",
 ];
 
 // Every request to MindChart's server carries this header. The server refuses requests without it,
@@ -46,6 +49,7 @@ function display(object, column, value) {
   if (type === "checkbox") return value ? '<span class="badge">Yes</span>' : '<span class="badge plain">No</span>';
   if (column === "section") return esc(state.sectionTitles[value] || value);
   if (column === "read_state") return `<span class="read-${esc(value)}">${esc(READ_STATES[value] || value)}</span>`;
+  if (column === "consent") return consentBadge(value);
   return esc(value);
 }
 
@@ -211,7 +215,8 @@ window.addEventListener("beforeunload", (e) => { if (state.dirtyDraft) e.prevent
 
 function renderNav() {
   const here = location.hash || "#/";
-  const items = [["#/", "Home", "i-home"], ["#/uploads", "Uploads", "i-upload"], ...["patients", "documents", "facts", "drafts", "activity"]
+  const items = [["#/", "Home", "i-home"], ["#/uploads", "Uploads", "i-upload"],
+    ...["patients", "follow_ups", "medications", "documents", "facts", "drafts", "activity"]
     .map((o) => [`#/list/${o}`, state.objects[o].plural, ICONS[o]]), ["#/settings", "Settings", "i-settings"]];
   $("#nav").innerHTML = items.map(([href, text, icon]) => {
     const object = href.split("/")[2];
@@ -286,6 +291,7 @@ async function homeView() {
     ${state.work.uploads ? `<a class="banner inbox" href="#/uploads"><span class="i-upload"></span>
       <span><b>${state.work.uploads} upload${state.work.uploads === 1 ? "" : "s"} waiting for review.</b> Check each one's patient and type to file it →</span></a>` : ""}
     <div id="gettingStarted"></div>
+    <div id="comingUp"></div>
     <div class="card">
       <h2>Try asking</h2>
       <div class="chips">${EXAMPLES.map((e) => `<button class="chip" data-example="${esc(e)}">${esc(e)}</button>`).join("")}</div>
@@ -301,6 +307,7 @@ async function homeView() {
   $("#newPatient").onclick = () => newPatientForm($("#newPatientForm"));
   $("#homeUpload").onclick = () => pickFiles();
   renderChecklist();
+  renderComingUp();
 }
 
 function newPatientForm(target) {
@@ -343,13 +350,14 @@ async function listView(object, search = "") {
   const spec = state.objects[object];
   if (!spec) throw new Error("Unknown page");
   const data = await api("GET", `records/${object}?search=${encodeURIComponent(search)}`);
+  const placeholder = object === "documents" ? "Search documents, including their text…" : `Search ${spec.plural.toLowerCase()}…`;
   $("#view").innerHTML = `
     <div class="page-head"><span class="object-icon obj-${object}"><span class="${ICONS[object]}"></span></span>
       <h1>${esc(spec.plural)}</h1><span class="badge plain">${data.rows.length}</span><span class="grow"></span>
       ${object === "patients" ? '<button id="newPatient">+ New patient</button>' : ""}
       ${object === "documents" ? '<button id="listUpload">Upload documents</button>' : ""}</div>
     <div id="newPatientForm"></div>
-    <div class="list-tools"><input id="search" placeholder="Search ${esc(spec.plural.toLowerCase())}…" value="${esc(search)}"></div>
+    <div class="list-tools"><input id="search" placeholder="${esc(placeholder)}" value="${esc(search)}"></div>
     <div id="listBody">${data.rows.length ? recordsTable(object, data.rows) : '<p class="empty">Nothing here yet.</p>'}</div>`;
   let timer;
   $("#search").oninput = () => {
@@ -520,25 +528,38 @@ function factsBySection(facts, showDocument) {
 
 function patientExtras(data, body) {
   const uid = data.record.id;
-  const { documents, facts, drafts, activity } = data.related;
+  const { documents, facts, drafts, activity, medications, measures, follow_ups } = data.related;
   $("#recordActions").insertAdjacentHTML("afterbegin", `
     <button class="secondary" id="uploadBtn">Upload documents</button>
     <button class="secondary" id="noteBtn">Add note</button>
+    <button class="secondary" id="visitBtn">Write visit note</button>
     <button id="buildBtn" ${documents.length ? "" : "disabled"}>Build history</button>`);
   body.insertAdjacentHTML("beforeend", `
     <div id="noteBox"></div>
     <div id="buildBox"></div>
+    <div class="card" id="followUpsCard"></div>
+    <div class="card" id="medsCard"></div>
+    <div class="card" id="measuresCard"></div>
     <div class="card"><h2>Documents & notes <span class="count">${documents.length}</span></h2>
       ${documents.length ? recordsTable("documents", documents, ["name", "document_type", "document_date", "author", "read_state", "facts"])
         : '<p class="empty">Upload records (PDF, Word, photos or faxes), or drop them onto this page. You can also add a note.</p>'}</div>
     <div class="card"><h2>Facts <span class="count">${facts.length}</span></h2>${factsBySection(facts, true)}</div>
+    <div class="card"><details id="timeline"><summary><h2>Timeline <span class="muted small">their history in date order</span></h2></summary>
+      <div id="timelineBody"><div class="thinking"><span class="spinner"></span>Putting events in order…</div></div></details></div>
     <div class="grid2">
       <div class="card"><h2>Drafts <span class="count">${drafts.length}</span></h2>
         ${drafts.length ? recordsTable("drafts", drafts, ["created", "updated", "model"]) : '<p class="empty">No drafts yet.</p>'}</div>
       <div class="card"><h2>Activity</h2>${activity.length ? recordsTable("activity", activity.slice(0, 15), ["time", "action", "detail"]) : '<p class="empty">None.</p>'}</div>
     </div>`);
+  body.insertAdjacentHTML("afterbegin", glance(data));
+  if (!$("#editForm")) $("#measuresCard").after(body.querySelector(".glance + .card"));  // the clinical cards first; details below
+  renderFollowUps(uid, follow_ups);
+  renderMeds(uid, medications);
+  renderMeasures(uid, measures);
+  $("#timeline").addEventListener("toggle", () => { if ($("#timeline").open) loadTimeline(uid); });
 
   $("#uploadBtn").onclick = () => pickFiles(uid);
+  $("#visitBtn").onclick = () => visitNoteForm(data);
 
   $("#noteBtn").onclick = () => {
     $("#noteBox").innerHTML = `<form class="card" onsubmit="return false"><h2>New note</h2>
@@ -557,6 +578,398 @@ function patientExtras(data, body) {
   };
 
   $("#buildBtn").onclick = () => buildPanel(uid, documents);
+}
+
+// --- On a patient's page: follow-ups, medications, rating scales, the timeline ------------
+
+// A strip across the top of a patient's page: age, placement, current medications, latest score, and what's due next.
+function glance(data) {
+  const r = data.record, custom = data.custom || {};
+  const dob = parseDay(r.dob), today = new Date();
+  const age = dob ? today.getFullYear() - dob.getFullYear() - (today < new Date(today.getFullYear(), dob.getMonth(), dob.getDate()) ? 1 : 0) : null;
+  const where = [r.record_type, custom.cottage || custom.program || custom.foster_home || custom.clinic].filter(Boolean).join(" · ");
+  const meds = data.related.medications.filter((m) => m.status === "Active");
+  const score = data.related.measures.find((m) => m.measure !== "Vitals" && m.score !== null && m.score !== "");
+  const next = data.related.follow_ups.filter((f) => f.status !== "Done").map((f) => ({ ...f, days: daysFromToday(f.due) }))
+    .filter((f) => f.days !== null).sort((a, b) => a.days - b.days)[0];
+  const item = (label, value, extra = "") => `<div class="glance-item"><span>${label}</span><b>${value}</b>${extra ? `<small>${extra}</small>` : ""}</div>`;
+  return `<div class="glance">
+    ${item("Age", age !== null ? `${age}` : "—", r.dob ? `born ${esc(r.dob)}` : "")}
+    ${item("Placement", esc(where || "—"), custom.admission_date ? `since ${esc(custom.admission_date)}` : "")}
+    ${item("Current medications", meds.length ? esc(meds.map((m) => m.name).join(", ")) : "None recorded")}
+    ${item("Latest score", score ? `${esc(score.measure.split(" (")[0])} ${esc(score.score)}` : "—", score ? `${esc(bandFor(score.measure, score.score))}${bandFor(score.measure, score.score) ? " · " : ""}${esc(score.date)}` : "")}
+    ${item("Next due", next ? esc(next.title) : "Nothing open", next ? `<span class="${next.days < 0 ? "warn" : ""}">${whenLabel(next.days)}</span>` : "")}
+  </div>`;
+}
+
+// A date as people write it (MM/DD/YYYY, 2024-05-01, May 1, 2024) as a Date, or null.
+function parseDay(text) {
+  const t = String(text || "").trim();
+  let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return new Date(+m[1], m[2] - 1, +m[3]);
+  m = t.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})$/);
+  if (m) return new Date(m[3].length === 2 ? 2000 + +m[3] : +m[3], m[1] - 1, +m[2]);
+  const parsed = Date.parse(t);
+  return isNaN(parsed) ? null : new Date(parsed);
+}
+
+function daysFromToday(text) {
+  const day = parseDay(text);
+  if (!day) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((day - today) / 86400000);
+}
+
+function whenLabel(days) {
+  if (days === null || days === undefined) return "No date";
+  if (days < 0) return `${-days} day${days === -1 ? "" : "s"} overdue`;
+  return days === 0 ? "Today" : days === 1 ? "Tomorrow" : `In ${days} days`;
+}
+
+const todayText = () => { const d = new Date(); return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`; };
+
+// One line in a list of things due: when, what, and (on Home) whose.
+function dueRow(item, showPatient) {
+  const days = item.days !== undefined ? item.days : daysFromToday(item.due);
+  return `<li class="${days !== null && days < 0 ? "overdue" : ""}">
+    <span class="due-when">${whenLabel(days)}<small>${esc(item.when ?? item.due ?? "")}</small></span>
+    <span class="due-what">${recordLink(item.id, esc(item.text ?? item.title))}
+      <small>${showPatient ? recordLink(item.patient_id, esc(item.patient)) + " · " : ""}${esc(item.kind ?? item.category ?? "")}</small></span>
+    ${item.follow_up !== false ? `<button class="secondary small" data-done="${esc(item.id)}">Done</button>` : ""}</li>`;
+}
+
+function bindDone(box, after) {
+  box.querySelectorAll("[data-done]").forEach((b) => b.onclick = async () => {
+    await api("POST", `records/follow_ups/${b.dataset.done}`, { status: "Done" });
+    toast("Marked done ✓");
+    after();
+  });
+}
+
+async function renderComingUp() {
+  const box = document.getElementById("comingUp");
+  if (!box) return;
+  let items;
+  try { items = (await api("GET", "coming-up")).items; } catch { return; }
+  box.innerHTML = `<div class="card"><h2>Coming up <span class="count">${items.length}</span>
+      <span class="muted small" style="font-family:var(--sans)">the next six weeks, and anything overdue</span></h2>
+    ${items.length ? `<ul class="due-list">${items.map((i) => dueRow(i, true)).join("")}</ul>` : `<p class="empty">Nothing due. Add follow-ups on
+      a patient's page, or type “Remind me to renew Jordan's consent by 12/01” in the bar at the top. Court order expiry dates,
+      IEP reviews and consents still needed show up here by themselves.</p>`}</div>`;
+  bindDone(box, renderComingUp);
+}
+
+// A form for adding a medication, measure or follow-up to a patient.
+function addRecordForm(box, object, patientUid, defaults = {}) {
+  const fields = state.objects[object].fields.filter((f) => f.edit !== false);
+  box.innerHTML = `<form class="inset add-form" onsubmit="return false">
+      <div class="fields">${fields.map((f) => fieldInput(object, f, defaults[f.name] ?? "")).join("")}</div>
+      <div class="custom-fields"></div>
+      <div class="actions" style="margin-top:12px"><button type="submit" class="small">Save</button>
+        <button type="button" class="secondary small" data-cancel>Cancel</button><span class="error"></span></div></form>`;
+  const form = box.querySelector("form");
+  bindRecordType(form, object, defaults.custom || {}, "custom.");
+  form.querySelector("[data-cancel]").onclick = () => box.innerHTML = "";
+  form.onsubmit = async () => {
+    try {
+      await api("POST", `records/${object}`, { ...formValues(form), patient_id: patientUid });
+      toast("Saved ✓");
+      recordView("patients", patientUid);
+    } catch (err) { form.querySelector(".error").textContent = err.message; }
+    return false;
+  };
+  form.querySelector("input, select, textarea")?.focus();
+}
+
+function renderFollowUps(uid, rows) {
+  const card = $("#followUpsCard");
+  const open = rows.filter((r) => r.status !== "Done");
+  const done = rows.length - open.length;
+  card.innerHTML = `<h2>Follow-ups <span class="count">${open.length}</span>
+      <span class="actions"><button class="secondary small" data-add>+ Add follow-up</button></span></h2>
+    <div class="add-box"></div>
+    ${open.length ? `<ul class="due-list">${open.map((f) => dueRow(f, false)).join("")}</ul>`
+      : '<p class="empty">Nothing open. Keep track of court dates, IEP meetings, consents and labs here.</p>'}
+    ${done ? `<p class="muted small">${done} done</p>` : ""}`;
+  card.querySelector("[data-add]").onclick = () => addRecordForm(card.querySelector(".add-box"), "follow_ups", uid, { status: "Open" });
+  bindDone(card, () => recordView("patients", uid));
+}
+
+function consentBadge(value) {
+  if (!value) return '<span class="empty">—</span>';
+  return `<span class="badge ${["On file", "Not needed"].includes(value) ? "" : "warn-badge"}">${esc(value)}</span>`;
+}
+
+function renderMeds(uid, rows) {
+  const card = $("#medsCard");
+  const current = rows.filter((r) => r.status !== "Stopped"), past = rows.filter((r) => r.status === "Stopped");
+  const cell = (m, key) => key === "name" ? `${recordLink(m.id, `<b>${esc(m.name)}</b>`)}${m.status === "Planned" ? ' <span class="badge plain">Planned</span>' : ""}`
+    : key === "consent" ? consentBadge(m.consent) + (m.consent_by ? ` <span class="muted small">${esc(m.consent_by)}</span>` : "")
+    : m[key] ? esc(m[key]) : '<span class="empty">—</span>';
+  const table = (list, columns) => `<div class="table-wrap"><table><thead><tr>${columns.map(([, title]) => `<th>${title}</th>`).join("")}</tr></thead>
+    <tbody>${list.map((m) => `<tr>${columns.map(([key]) => `<td class="${key === "response" ? "clip" : ""}">${cell(m, key)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+  card.innerHTML = `<h2>Medications <span class="count">${current.length}</span><span class="actions">
+      <button class="secondary small" data-suggest>Suggest from records</button><button class="secondary small" data-add>+ Add medication</button></span></h2>
+    <div class="add-box"></div><div class="suggest-box"></div>
+    ${current.length ? table(current, [["name", "Medication"], ["dose", "Dose"], ["frequency", "How often"], ["target", "For"], ["start_date", "Started"], ["consent", "Consent"]])
+      : '<p class="empty">No current medications recorded. Add them, or let MindChart suggest them from the records it has read.</p>'}
+    ${past.length ? `<details class="past"><summary class="muted small">Past medications (${past.length})</summary>
+      ${table(past, [["name", "Medication"], ["dose", "Dose"], ["start_date", "Started"], ["stop_date", "Stopped"], ["stop_reason", "Why stopped"], ["response", "Response"]])}</details>` : ""}`;
+  card.querySelector("[data-add]").onclick = () => addRecordForm(card.querySelector(".add-box"), "medications", uid, { status: "Active" });
+  card.querySelector("[data-suggest]").onclick = () => suggestMeds(uid, card.querySelector(".suggest-box"));
+}
+
+// A medication list drafted by the AI from the facts in the patient's records, to check and add.
+async function suggestMeds(uid, box) {
+  box.innerHTML = `<div class="inset"><div class="thinking"><span class="spinner"></span>Reading the medication facts in this patient's records…</div></div>`;
+  aiBusy(true);
+  try {
+    const { suggestions } = await api("POST", `patients/${uid}/medications/suggest`, { model: modelChoice() });
+    if (!suggestions.length) {
+      box.innerHTML = `<div class="inset"><p class="muted small">No medications found that aren't on the list already. Only documents that
+        have been read are used; new uploads are read in the background.</p></div>`;
+      return;
+    }
+    box.innerHTML = `<div class="inset"><h3>Found in the records <span class="muted small">check each one, then add the ones that are right</span></h3>
+      ${suggestions.map((m, i) => `<div class="suggestion"><label class="check"><input type="checkbox" data-pick="${i}" checked>
+          <b>${esc(m.name)}</b> ${esc([m.dose, m.frequency].filter(Boolean).join(" "))}</label>
+        <select data-status="${i}" aria-label="Status"><option value="">Status…</option>${["Active", "Stopped", "Planned"].map((o) =>
+          `<option ${o === m.status ? "selected" : ""}>${o}</option>`).join("")}</select>
+        <div class="muted small">${esc([m.start_date && `started ${m.start_date}`, m.stop_date && `stopped ${m.stop_date}`, m.stop_reason, m.response].filter(Boolean).join(" · "))}</div>
+        <details><summary class="muted small">From ${esc(m.source)}</summary>${m.quotes.map((q) => `<div class="ai-quote">${esc(q)}</div>`).join("")}</details></div>`).join("")}
+      <div class="actions" style="margin-top:12px"><button class="small" data-add-picked>Add selected</button>
+        <button class="secondary small" data-cancel>Cancel</button><span class="error"></span></div></div>`;
+    box.querySelector("[data-cancel]").onclick = () => box.innerHTML = "";
+    box.querySelector("[data-add-picked]").onclick = async () => {
+      const picked = [...box.querySelectorAll("[data-pick]:checked")].map((c) => +c.dataset.pick);
+      const missing = picked.find((i) => !box.querySelector(`[data-status="${i}"]`).value);
+      if (missing !== undefined) { box.querySelector(".error").textContent = `Choose whether ${suggestions[missing].name} is current or stopped.`; return; }
+      for (const i of picked) {
+        const { quotes, ...fields } = suggestions[i];
+        await api("POST", "records/medications", { ...fields, status: box.querySelector(`[data-status="${i}"]`).value, patient_id: uid });
+      }
+      toast(`Added ${picked.length} medication${picked.length === 1 ? "" : "s"} ✓`);
+      recordView("patients", uid);
+    };
+  } catch (err) {
+    box.innerHTML = `<div class="inset"><p class="error">${esc(err.message)}</p></div>`;
+  } finally {
+    aiBusy(false);
+  }
+}
+
+function bandFor(measure, score) {
+  if (score === null || score === undefined || score === "") return "";
+  return ((state.objects.measures.bands || {})[measure] || []).find(([highest]) => +score <= highest)?.[1] || "";
+}
+
+// A small line chart of one measure over time, with the scale's published bands shaded behind it.
+function measureChart(measure, points, unit = "") {
+  const W = 340, H = 126, L = 30, R = 12, T = 10, B = 22;
+  const values = points.map((p) => +p.value);
+  const top = (state.objects.measures.max || {})[measure] ?? Math.ceil(Math.max(...values) * 1.15 || 1);
+  const bottom = (state.objects.measures.max || {})[measure] !== undefined ? 0 : Math.floor(Math.min(...values) * 0.85);
+  const x = (i) => L + (points.length === 1 ? (W - L - R) / 2 : i * (W - L - R) / (points.length - 1));
+  const y = (v) => T + (H - T - B) * (1 - (v - bottom) / ((top - bottom) || 1));
+  let low = bottom;
+  const bands = ((state.objects.measures.bands || {})[measure] || []).map(([highest], i) => {
+    const rect = `<rect x="${L}" y="${y(highest)}" width="${W - L - R}" height="${y(low) - y(highest)}" class="band band-${i}"/>`;
+    low = highest;
+    return rect;
+  }).join("");
+  const line = points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(+p.value).toFixed(1)}`).join(" ");
+  const labelEvery = Math.ceil(points.length / 5);
+  return `<svg viewBox="0 0 ${W} ${H}" class="chart" role="img" aria-label="${esc(measure)} over time">
+    ${bands}<line x1="${L}" x2="${W - R}" y1="${H - B}" y2="${H - B}" class="axis"/>
+    <text x="${L - 6}" y="${y(top) + 4}" class="tick" text-anchor="end">${top}</text><text x="${L - 6}" y="${y(bottom) + 4}" class="tick" text-anchor="end">${bottom}</text>
+    <path d="${line}" class="series"/>
+    ${points.map((p, i) => `<circle cx="${x(i)}" cy="${y(+p.value)}" r="3.5" class="dot"><title>${esc(p.date)}: ${esc(p.value)}${unit}</title></circle>
+      ${i % labelEvery === 0 || i === points.length - 1 ? `<text x="${x(i)}" y="${H - 6}" class="tick" text-anchor="middle">${esc(shortDate(p.date))}</text>` : ""}`).join("")}
+  </svg>`;
+}
+
+function shortDate(text) {
+  const d = parseDay(text);
+  return d ? `${d.getMonth() + 1}/${String(d.getFullYear()).slice(2)}` : text;
+}
+
+function renderMeasures(uid, rows) {
+  const card = $("#measuresCard");
+  const groups = {};
+  rows.forEach((r) => (groups[r.measure] = groups[r.measure] || []).push({ ...r, custom: JSON.parse(r.details || "{}") }));
+  const blocks = Object.entries(groups).map(([measure, list]) => {
+    const ordered = list.sort((a, b) => (parseDay(a.date) || 0) - (parseDay(b.date) || 0));
+    const latest = ordered[ordered.length - 1];
+    const series = (key, label, unit = "") => {
+      const points = ordered.filter((r) => (key ? r.custom[key] : r.score) !== undefined && (key ? r.custom[key] : r.score) !== null && (key ? r.custom[key] : r.score) !== "")
+        .map((r) => ({ date: r.date, value: key ? r.custom[key] : r.score }));
+      return points.length ? `<div class="measure"><div class="measure-head"><b>${esc(label)}</b>
+          <span class="measure-latest">${esc(points[points.length - 1].value)}${unit}${!key && bandFor(measure, points[points.length - 1].value) ? ` · ${esc(bandFor(measure, points[points.length - 1].value))}` : ""}</span>
+          <small>${esc(points[points.length - 1].date)} · ${points.length} ${points.length === 1 ? "entry" : "entries"}</small></div>
+        ${measure === "PHQ-A (depression)" && +latest.custom.self_harm_item > 0 ? `<div class="flag">⚠ Question 9 (thoughts of self-harm): ${esc(latest.custom.self_harm_item)} on ${esc(latest.date)}</div>` : ""}
+        ${measureChart(key ? label : measure, points, unit)}</div>` : "";
+    };
+    if (measure === "Vitals") return series("weight_lb", "Weight", " lb") + series("bmi", "BMI");
+    if (measure === "Vanderbilt ADHD") return series("inattentive", "Vanderbilt: inattentive symptoms") + series("hyperactive", "Vanderbilt: hyperactive symptoms");
+    return series(null, measure);
+  }).join("");
+  card.innerHTML = `<h2>Rating scales and vitals <span class="count">${rows.length}</span>
+      <span class="actions"><button class="secondary small" data-add>+ Add a score or vitals</button></span></h2>
+    <div class="add-box"></div>
+    ${blocks ? `<div class="measures">${blocks}</div>` : `<p class="empty">Track PHQ-A, GAD-7, SCARED, Vanderbilt and CRAFFT scores, or weight
+      and BMI, to see change over time. Only totals are kept, not the questionnaires.</p>`}`;
+  card.querySelector("[data-add]").onclick = () => addRecordForm(card.querySelector(".add-box"), "measures", uid,
+    { measure: "PHQ-A (depression)", date: todayText() });
+}
+
+const TIMELINE_KINDS = { birth: "Born", placement: "Placement", document: "Document", medication: "Medication",
+  measure: "Score", follow_up: "Follow-up" };
+
+async function loadTimeline(uid) {
+  const box = $("#timelineBody");
+  if (box.dataset.loaded) return;
+  try {
+    const { events } = await api("GET", `patients/${uid}/timeline`);
+    box.dataset.loaded = "1";
+    if (!events.length) { box.innerHTML = '<p class="empty">No dated events yet. They come from documents once they\'re read, and from medications, scores and follow-ups.</p>'; return; }
+    const years = {};
+    events.forEach((e) => (years[e.key[0]] = years[e.key[0]] || []).push(e));
+    box.innerHTML = `<p class="muted small">Dated facts from the documents (verified ones only), plus medications, scores and follow-ups.
+        Undated facts aren't shown; they're in the Facts list.</p>` +
+      Object.entries(years).map(([year, list]) => `<div class="tl-year"><h3>${year}</h3><ul class="timeline">
+        ${list.map((e) => `<li class="tl-${e.kind}"><span class="tl-when">${esc(e.when)}</span>
+          <span class="tl-kind">${esc(e.kind === "fact" ? state.sectionTitles[e.section] || "Fact" : TIMELINE_KINDS[e.kind] || e.kind)}</span>
+          <span class="tl-text">${recordLink(e.id, esc(e.text))}${e.source ? ` <span class="muted small">· ${esc(e.source)}</span>` : ""}</span></li>`).join("")}
+      </ul></div>`).join("");
+  } catch (err) {
+    box.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+  }
+}
+
+// --- Visit notes: the clinician's notes and a click-through mental status exam, written up by the AI -----
+
+// [domain, choices, the usual findings that "Mark the usual findings" picks, groups of choices that rule each other out]
+const MSE = [
+  ["Appearance", ["well groomed", "appropriately dressed", "disheveled", "poor hygiene"], ["well groomed", "appropriately dressed"],
+    [["well groomed", "disheveled"]]],
+  ["Behavior", ["calm", "cooperative", "good eye contact", "guarded", "restless", "agitated", "withdrawn"], ["calm", "cooperative", "good eye contact"],
+    [["calm", "agitated"], ["cooperative", "guarded"]]],
+  ["Speech", ["normal rate, volume and tone", "pressured", "slowed", "soft", "loud", "minimal"], ["normal rate, volume and tone"],
+    [["normal rate, volume and tone", "pressured"], ["normal rate, volume and tone", "slowed"], ["normal rate, volume and tone", "soft"],
+     ["normal rate, volume and tone", "loud"], ["normal rate, volume and tone", "minimal"]]],
+  ["Mood (in their words)", null],
+  ["Affect", ["euthymic", "full range", "constricted", "flat", "anxious", "irritable", "tearful", "labile"], ["euthymic", "full range"],
+    [["full range", "constricted", "flat"], ["euthymic", "anxious"], ["euthymic", "irritable"], ["euthymic", "tearful"]]],
+  ["Thought process", ["linear and goal-directed", "tangential", "circumstantial", "disorganized"], ["linear and goal-directed"],
+    [["linear and goal-directed", "tangential"], ["linear and goal-directed", "circumstantial"], ["linear and goal-directed", "disorganized"]]],
+  ["Thought content", ["denies suicidal ideation", "passive death wish", "suicidal ideation without plan", "suicidal ideation with plan",
+    "denies homicidal ideation", "homicidal ideation", "no delusions elicited"], ["denies suicidal ideation", "denies homicidal ideation", "no delusions elicited"],
+    [["denies suicidal ideation", "passive death wish", "suicidal ideation without plan", "suicidal ideation with plan"], ["denies homicidal ideation", "homicidal ideation"]]],
+  ["Perception", ["denies hallucinations", "auditory hallucinations", "visual hallucinations", "not responding to internal stimuli"],
+    ["denies hallucinations", "not responding to internal stimuli"], [["denies hallucinations", "auditory hallucinations"], ["denies hallucinations", "visual hallucinations"]]],
+  ["Cognition", ["alert", "oriented", "attention intact", "distractible"], ["alert", "oriented", "attention intact"], [["attention intact", "distractible"]]],
+  ["Insight", ["good", "fair", "limited", "poor"], [], [["good", "fair", "limited", "poor"]]],
+  ["Judgment", ["good", "fair", "limited", "poor"], [], [["good", "fair", "limited", "poor"]]],
+];
+
+function visitNoteForm(data) {
+  const uid = data.record.id, name = data.record.name;
+  const meds = data.related.medications.filter((m) => m.status === "Active");
+  const latest = {};
+  [...data.related.measures].reverse().forEach((m) => { latest[m.measure] = m; });
+  const scores = Object.values(latest).filter((m) => m.measure !== "Vitals" && m.score !== null && m.score !== "");
+  $("#noteBox").innerHTML = `<form class="card visit-note" onsubmit="return false">
+    <h2>Visit note for ${esc(name)} <span class="actions"><button type="button" class="link small" data-close>Close</button></span></h2>
+    <p class="muted small">Write what happened in your own words, pick the mental status findings, and add your assessment and plan. The AI turns
+      it into a note without adding anything; you check and edit it before saving or copying.</p>
+    <div class="fields"><div class="field"><label>Visit date</label><input name="visit_date" value="${todayText()}"></div>
+      <div class="field"><label>Visit type</label><select name="visit_type">${["Medication management", "Follow-up", "Crisis visit", "Initial visit", "Other"].map((t) => `<option>${t}</option>`).join("")}</select></div>
+      <div class="field wide"><label>Since the last visit (what the youth, staff and guardian report)</label>
+        <textarea name="interval" rows="3" placeholder="Sleeping better since the dose increase. Staff report one argument with a peer, no aggression. Grandmother visited Sunday."></textarea></div></div>
+    <h3>Mental status exam <button type="button" class="link small" data-usual>Mark the usual findings</button> <button type="button" class="link small" data-clear>Clear</button></h3>
+    <div class="mse">${MSE.map(([domain, choices], d) => `<div class="mse-row"><span class="mse-domain">${esc(domain)}</span>
+      ${choices ? `<span class="chips">${choices.map((c) => `<button type="button" class="chip" data-mse="${d}" data-choice="${esc(c)}">${esc(c)}</button>`).join("")}</span>`
+        : `<input name="mood" placeholder="“okay”, “bored”, “tired”">`}</div>`).join("")}
+      <div class="mse-row"><span class="mse-domain">Other observations</span><input name="mse_other" placeholder="Anything else you noticed"></div></div>
+    <h3>Included from the record</h3>
+    <label class="check"><input type="checkbox" name="with_meds" ${meds.length ? "checked" : "disabled"}> Current medications
+      <span class="muted small">${meds.length ? esc(meds.map((m) => [m.name, m.dose, m.frequency].filter(Boolean).join(" ")).join("; ")) : "(none on the list)"}</span></label>
+    <label class="check"><input type="checkbox" name="with_scores" ${scores.length ? "checked" : "disabled"}> Latest scores
+      <span class="muted small">${scores.length ? esc(scores.map((m) => `${m.measure} ${m.score} (${m.date})`).join("; ")) : "(none recorded)"}</span></label>
+    <div class="field wide" style="margin-top:12px"><label>Assessment and plan (your notes)</label>
+      <textarea name="plan" rows="3" placeholder="Depressive symptoms improving. Continue sertraline 50 mg daily. Recheck PHQ-A in 4 weeks. Follow up in 1 month."></textarea></div>
+    <div class="actions" style="margin-top:12px"><button type="button" data-draft>Draft the note with AI</button>
+      <button type="button" class="secondary" data-assemble>Put it together without AI</button><span class="error"></span></div>
+    <div class="note-output" hidden><h3>The note <span class="muted small">edit anything before you save or copy it</span></h3>
+      <textarea name="note" rows="14"></textarea>
+      <div class="actions" style="margin-top:10px"><button type="button" data-save>Save to ${esc(name.split(" ")[0])}'s record</button>
+        <button type="button" class="secondary" data-copy>Copy</button></div></div>
+  </form>`;
+  const form = $("#noteBox form");
+  form.scrollIntoView({ behavior: "smooth" });
+  const picked = MSE.map(() => new Set());
+  const paint = () => form.querySelectorAll("[data-mse]").forEach((b) => b.classList.toggle("on", picked[+b.dataset.mse].has(b.dataset.choice)));
+  form.querySelectorAll("[data-mse]").forEach((b) => b.onclick = () => {
+    const d = +b.dataset.mse, choice = b.dataset.choice;
+    if (picked[d].has(choice)) picked[d].delete(choice);
+    else {
+      (MSE[d][3] || []).filter((group) => group.includes(choice)).flat().forEach((other) => picked[d].delete(other));  // e.g. "denies SI" vs "SI with plan"
+      picked[d].add(choice);
+    }
+    paint();
+  });
+  form.querySelector("[data-usual]").onclick = () => { MSE.forEach(([, , usual], d) => (usual || []).forEach((c) => picked[d].add(c))); paint(); };
+  form.querySelector("[data-clear]").onclick = () => { picked.forEach((set) => set.clear()); paint(); };
+  form.querySelector("[data-close]").onclick = () => $("#noteBox").innerHTML = "";
+  const value = (n) => form.querySelector(`[name=${n}]`).value.trim();
+  const mseText = () => MSE.map(([domain, choices], d) => {
+    const found = choices ? [...picked[d]].join(", ") : value("mood") && `“${value("mood").replace(/^[“"]|[”"]$/g, "")}”`;
+    return found ? `${domain.replace(" (in their words)", "")}: ${found}.` : "";
+  }).filter(Boolean).concat(value("mse_other") ? [`Other: ${value("mse_other")}`] : []).join(" ");
+  const medsText = () => form.querySelector("[name=with_meds]").checked ? meds.map((m) => [m.name, m.dose, m.frequency].filter(Boolean).join(" ")).join("; ") : "";
+  const scoresText = () => form.querySelector("[name=with_scores]").checked ? scores.map((m) => `${m.measure}: ${m.score}${bandFor(m.measure, m.score) ? ` (${bandFor(m.measure, m.score)})` : ""} on ${m.date}`).join("; ") : "";
+  const heading = () => `Visit note: ${value("visit_date")} (${value("visit_type")})`;
+  const show = (text) => { form.querySelector(".note-output").hidden = false; form.querySelector("[name=note]").value = text; form.querySelector("[name=note]").focus(); };
+  const check = () => {
+    if (!value("interval") && !mseText() && !value("plan")) throw new Error("Add what happened, the mental status findings, or your plan first.");
+  };
+  form.querySelector("[data-assemble]").onclick = () => {
+    try { check(); } catch (err) { form.querySelector(".error").textContent = err.message; return; }
+    show([heading(), "", `Subjective: ${value("interval") || "Not documented."}`, "",
+      `Objective: Mental status: ${mseText() || "Not documented."}${medsText() ? ` Current medications: ${medsText()}.` : ""}${scoresText() ? ` Scores: ${scoresText()}.` : ""}`,
+      "", `Assessment and plan: ${value("plan") || "Not documented."}`].join("\n"));
+  };
+  form.querySelector("[data-draft]").onclick = async () => {
+    try { check(); } catch (err) { form.querySelector(".error").textContent = err.message; return; }
+    const button = form.querySelector("[data-draft]");
+    button.disabled = true;
+    form.querySelector(".error").innerHTML = '<span class="thinking"><span class="spinner"></span>Writing it up (on this Mac)…</span>';
+    aiBusy(true);
+    try {
+      const inputs = [`Visit: ${value("visit_date")}, ${value("visit_type")}`, `Since the last visit: ${value("interval") || "(nothing entered)"}`,
+        `Mental status exam: ${mseText() || "(nothing entered)"}`, `Current medications: ${medsText() || "(not included)"}`,
+        `Scores: ${scoresText() || "(not included)"}`, `Clinician's assessment and plan: ${value("plan") || "(nothing entered)"}`].join("\n");
+      const note = await api("POST", `patients/${uid}/visit-note`, { inputs, model: modelChoice() });
+      show([heading(), "", `Subjective: ${note.subjective}`, "", `Objective: ${note.objective}`, "", `Assessment: ${note.assessment}`, "", `Plan: ${note.plan}`].join("\n"));
+      form.querySelector(".error").textContent = "";
+    } catch (err) {
+      form.querySelector(".error").textContent = err.message;
+    } finally {
+      button.disabled = false;
+      aiBusy(false);
+    }
+  };
+  form.querySelector("[data-copy]").onclick = async () => {
+    const box = form.querySelector("[name=note]");
+    try { await navigator.clipboard.writeText(box.value); } catch { box.select(); document.execCommand("copy"); }
+    toast("Copied. Paste it into your records system.");
+  };
+  form.querySelector("[data-save]").onclick = async () => {
+    await api("POST", `patients/${uid}/notes`, { text: form.querySelector("[name=note]").value, date: value("visit_date"), title: heading() });
+    toast("Saved to the record ✓ (it's used in future drafts too)");
+    recordView("patients", uid);
+  };
 }
 
 function buildPanel(uid, documents) {
@@ -1091,7 +1504,7 @@ $("#command").onsubmit = () => { runCommand(); return false; };
 
 function renderReply(reply) {
   if (reply.kind === "answer") {
-    const linkify = (v) => typeof v === "string" && /^(PT|DOC|FCT|DRF|ACT)-[A-Z0-9]{6}$/.test(v) ? recordLink(v) : esc(v ?? "");
+    const linkify = (v) => typeof v === "string" && /^(PT|DOC|FCT|DRF|ACT|MED|MSR|FUP)-[A-Z0-9]{6}$/.test(v) ? recordLink(v) : esc(v ?? "");
     showResult(`<h3 class="kicker">Answer</h3><p>${esc(reply.explanation)}</p>
       ${reply.rows.length ? `<div class="table-wrap"><table><thead><tr>${reply.columns.map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
         <tbody>${reply.rows.map((r) => `<tr>${r.map((v) => `<td>${linkify(v)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
@@ -1107,9 +1520,13 @@ function renderReply(reply) {
 }
 
 function renderProposal(proposal) {
-  const titles = { new_patient: "New patient", add_note: "New note", update_patient: "Update patient" };
+  const titles = { new_patient: "New patient", add_note: "New note", update_patient: "Update patient",
+    add_medication: "New medication", add_measure: "New score", add_follow_up: "New follow-up" };
   let fields = "";
-  if (proposal.action === "new_patient") {
+  if (proposal.object) {  // a medication, measure or follow-up
+    fields = state.objects[proposal.object].fields.filter((f) => f.edit !== false).map((f) => fieldInput(proposal.object, f,
+      proposal.fields[f.name] ?? ({ medications: { status: "Active" }, follow_ups: { status: "Open" } }[proposal.object] || {})[f.name] ?? "")).join("");
+  } else if (proposal.action === "new_patient") {
     fields = state.objects.patients.fields.filter((f) => f.edit !== false).map((f) => fieldInput("patients", f,
       proposal.fields[f.name] || (f.name === "status" ? "Active" : f.name === "record_type" ? f.options[0] : ""))).join("");
   } else if (proposal.action === "add_note") {
@@ -1126,11 +1543,12 @@ function renderProposal(proposal) {
       <h3 class="kicker">${titles[proposal.action]} · check before saving</h3>
       <p>${esc(proposal.summary)}${proposal.patient ? ` <b>${recordLink(proposal.patient.id, esc(proposal.patient.name))}</b>` : ""}</p>
       <div class="fields">${fields}</div>
-      ${proposal.action === "new_patient" ? '<div class="custom-fields"></div>' : ""}
+      ${proposal.action === "new_patient" || proposal.object === "measures" ? '<div class="custom-fields"></div>' : ""}
       <div class="actions" style="margin-top:14px"><button type="submit">Save</button><button type="button" class="secondary" data-cancel>Cancel</button><span class="error"></span></div>
     </form>`);
   const form = $("#commandResult form");
   if (proposal.action === "new_patient") bindRecordType(form, "patients", proposal.fields, "");
+  if (proposal.object === "measures") bindRecordType(form, "measures", {}, "custom.");
   form.querySelector("[data-cancel]").onclick = () => { $("#commandResult").hidden = true; };
   form.onsubmit = async () => {
     const values = formValues(form);

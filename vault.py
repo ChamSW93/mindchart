@@ -15,6 +15,9 @@ OBJECTS below and used everywhere: the database, the app's pages, and the assist
   Fact       one fact found in a document, with its quote, page and whether it was verified
   Draft      a history drafted for a patient
   Activity   the access log: who did what, when
+  Medication a medication a patient takes or took, with its consent
+  Measure    a rating scale score (PHQ-A, GAD-7...) or vitals, for following change over time
+  Follow-up  something due for a patient: a court date, an IEP meeting, a consent, labs
 
 Files dropped into MindChart wait in an uploads inbox (also inside the encrypted store) until the clinician
 confirms which patient they belong to and what type they are. Each confirmation is kept as an example, so
@@ -46,7 +49,7 @@ MOUNT = HOME / ".unlocked"
 DATABASE = MOUNT / "records.db"
 AUTO_LOCK_MINUTES = 15
 MIN_PASSWORD_LENGTH = 10
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 BACKUPS_KEPT = 5
 MAX_ATTEMPTS = 5  # wrong passwords allowed before MindChart makes you wait
 
@@ -132,6 +135,47 @@ OBJECTS = {
             {"name": "model", "label": "Model", "type": "text", "edit": False},
         ],
     },
+    "medications": {
+        "label": "Medication", "plural": "Medications", "prefix": "MED", "title_field": "name", "parent": "patients",
+        "fields": [
+            {"name": "name", "label": "Medication", "type": "text", "required": True},
+            {"name": "dose", "label": "Dose", "type": "text"},
+            {"name": "frequency", "label": "How often", "type": "text"},
+            {"name": "target", "label": "For (target symptoms)", "type": "text"},
+            {"name": "status", "label": "Status", "type": "picklist", "options": ["Active", "Stopped", "Planned"]},
+            {"name": "start_date", "label": "Started", "type": "date"},
+            {"name": "stop_date", "label": "Stopped", "type": "date"},
+            {"name": "stop_reason", "label": "Why stopped", "type": "text"},
+            {"name": "response", "label": "Response and side effects", "type": "longtext"},
+            {"name": "prescriber", "label": "Prescriber", "type": "text"},
+            {"name": "consent", "label": "Consent", "type": "picklist", "options": ["On file", "Requested", "Not yet requested", "Not needed"]},
+            {"name": "consent_by", "label": "Consent from", "type": "text"},
+            {"name": "consent_date", "label": "Consent date", "type": "date"},
+            {"name": "source", "label": "Found in", "type": "text", "edit": False},
+        ],
+    },
+    "measures": {
+        "label": "Measure", "plural": "Measures", "prefix": "MSR", "title_field": "measure", "parent": "patients",
+        "fields": [
+            {"name": "measure", "label": "Measure", "type": "picklist", "options": list(fieldtypes.DEFAULT_RECORD_TYPES["measures"]),
+             "required": True},
+            {"name": "date", "label": "Date", "type": "date", "required": True},
+            {"name": "score", "label": "Total score", "type": "number"},
+            {"name": "rater", "label": "Completed by", "type": "text"},
+            {"name": "notes", "label": "Notes", "type": "longtext"},
+        ],
+    },
+    "follow_ups": {
+        "label": "Follow-up", "plural": "Follow-ups", "prefix": "FUP", "title_field": "title", "parent": "patients",
+        "fields": [
+            {"name": "title", "label": "What", "type": "text", "required": True},
+            {"name": "due", "label": "Due", "type": "date"},
+            {"name": "category", "label": "Kind", "type": "picklist",
+             "options": ["Court", "School / IEP", "Medication / labs", "Consent", "Appointment", "Other"]},
+            {"name": "status", "label": "Status", "type": "picklist", "options": ["Open", "Done"]},
+            {"name": "notes", "label": "Notes", "type": "longtext"},
+        ],
+    },
     "activity": {
         "label": "Activity", "plural": "Activity", "prefix": "ACT", "title_field": "action",
         "fields": [
@@ -159,7 +203,7 @@ def table_sql(name):
     # "custom" holds the record type's own fields as JSON (see fields.py).
     # Documents also note whether they're waiting to be read in the background (read_state) and what to take from them (pull).
     columns += {"patients": ["custom TEXT"], "documents": ["original BLOB", "pages TEXT", "read_at TEXT", "custom TEXT",
-                                                           "read_state TEXT", "pull TEXT"],
+                                                           "read_state TEXT", "pull TEXT"], "measures": ["custom TEXT"],
                 "drafts": ["result TEXT"],
                 # The log names its patient by record ID rather than a link that could change or be reused,
                 # and each entry carries a hash chained to the one before (see chain_hash).
@@ -170,7 +214,8 @@ def table_sql(name):
 # Views with patient and document details joined in, used by lists, search and the assistant.
 VIEWS = """
 DROP VIEW IF EXISTS patients_view; DROP VIEW IF EXISTS documents_view; DROP VIEW IF EXISTS facts_view;
-DROP VIEW IF EXISTS drafts_view; DROP VIEW IF EXISTS activity_view;
+DROP VIEW IF EXISTS drafts_view; DROP VIEW IF EXISTS activity_view; DROP VIEW IF EXISTS medications_view;
+DROP VIEW IF EXISTS measures_view; DROP VIEW IF EXISTS follow_ups_view;
 CREATE VIEW patients_view AS
     SELECT p.uid AS id, p.name, p.record_type, p.dob, p.gender, p.mrn, p.status, p.guardian, p.notes, p.created,
            (SELECT COUNT(*) FROM documents d WHERE d.patient_id = p.id) AS documents,
@@ -188,6 +233,17 @@ CREATE VIEW facts_view AS
 CREATE VIEW drafts_view AS
     SELECT r.uid AS id, p.uid AS patient_id, p.name AS patient, r.created, r.updated, r.model
     FROM drafts r JOIN patients p ON p.id = r.patient_id;
+CREATE VIEW medications_view AS
+    SELECT m.uid AS id, p.uid AS patient_id, p.name AS patient, m.name, m.dose, m.frequency, m.target, m.status,
+           m.start_date, m.stop_date, m.stop_reason, m.response, m.prescriber, m.consent, m.consent_by, m.consent_date, m.source
+    FROM medications m JOIN patients p ON p.id = m.patient_id;
+CREATE VIEW measures_view AS
+    SELECT s.uid AS id, p.uid AS patient_id, p.name AS patient, s.measure, s.date, s.score, s.rater, s.notes,
+           s.custom AS details  -- the measure's own fields (subscales, vitals), as JSON
+    FROM measures s JOIN patients p ON p.id = s.patient_id;
+CREATE VIEW follow_ups_view AS
+    SELECT f.uid AS id, p.uid AS patient_id, p.name AS patient, f.title, f.due, f.category, f.status, f.notes
+    FROM follow_ups f JOIN patients p ON p.id = f.patient_id;
 CREATE VIEW activity_view AS
     SELECT a.uid AS id, a.patient_uid AS patient_id, p.name AS patient, a.time, a.actor, a.action, a.detail,
            a.id AS seq  -- the order entries were written, for sorting entries made in the same second
@@ -383,6 +439,9 @@ def patient_of(db, name, row_id):
         "documents": "SELECT patient_id FROM documents WHERE id = ?",
         "facts": "SELECT d.patient_id FROM facts f JOIN documents d ON d.id = f.document_id WHERE f.id = ?",
         "drafts": "SELECT patient_id FROM drafts WHERE id = ?",
+        "medications": "SELECT patient_id FROM medications WHERE id = ?",
+        "measures": "SELECT patient_id FROM measures WHERE id = ?",
+        "follow_ups": "SELECT patient_id FROM follow_ups WHERE id = ?",
     }[name]
     row = db.execute(query, (row_id,)).fetchone()
     return row[0] if row else None
@@ -509,6 +568,7 @@ def describe_objects():
         described[name]["record_type_descriptions"] = record_type_descriptions(name)
         described[name]["fields"] = [{**f, "options": list(record_types)} if f["name"] == type_field else f
                                      for f in OBJECTS[name]["fields"]]
+    described["measures"].update(bands=fieldtypes.MEASURE_BANDS, max=fieldtypes.MEASURE_MAX)
     return described
 
 
@@ -663,16 +723,28 @@ def list_records(name, search="", patient_uid=None, limit=1000):
         columns = [row[1] for row in db.execute(f"PRAGMA table_info({view})")]
         where, args = [], []
         if search.strip():
-            where.append("(" + " OR ".join(f"CAST({c} AS TEXT) LIKE ?" for c in columns) + ")")
-            args += [f"%{search.strip()}%"] * len(columns)
+            matches = [f"CAST({c} AS TEXT) LIKE ?" for c in columns]
+            if name == "documents":  # documents' own text too
+                matches.append("id IN (SELECT uid FROM documents WHERE pages LIKE ?)")
+            where.append("(" + " OR ".join(matches) + ")")
+            args += [f"%{search.strip()}%"] * len(matches)
         if patient_uid and "patient_id" in columns:
             where.append("patient_id = ?")
             args.append(patient_uid)
         order = {"patients": "name COLLATE NOCASE", "documents": "added DESC", "facts": "document_date DESC, section",
-                 "drafts": "created DESC", "activity": "seq DESC"}[name]
-        rows = db.execute(f"SELECT * FROM {view} {'WHERE ' + ' AND '.join(where) if where else ''} "
-                          f"ORDER BY {order} LIMIT ?", (*args, limit)).fetchall()
-    return {"columns": columns, "rows": [dict(r) for r in rows]}
+                 "drafts": "created DESC", "activity": "seq DESC", "medications": "patient, name COLLATE NOCASE",
+                 "measures": "patient", "follow_ups": "patient"}[name]
+        rows = [dict(r) for r in db.execute(f"SELECT * FROM {view} {'WHERE ' + ' AND '.join(where) if where else ''} "
+                                            f"ORDER BY {order} LIMIT ?", (*args, limit))]
+    # Dates are written as people write them (MM/DD/YYYY), so these are put in date order here rather than as text.
+    later = lambda text: fieldtypes.date_key(text) or (9999, 0, 0)
+    if name == "medications":  # current ones first, then most recently started
+        rows.sort(key=lambda r: (r["status"] != "Active", r["status"] != "Planned", tuple(-x for x in later(r["start_date"]))))
+    elif name == "measures":  # newest first
+        rows.sort(key=lambda r: tuple(-x for x in later(r["date"])))
+    elif name == "follow_ups":  # open ones first, soonest due first
+        rows.sort(key=lambda r: (r["status"] == "Done", later(r["due"])))
+    return {"columns": columns, "rows": rows}
 
 
 def get_record(name, uid):
@@ -685,7 +757,7 @@ def get_record(name, uid):
     if name in fieldtypes.RECORD_TYPE_FIELD:
         record["custom"], record["ai_sources"] = custom_values(row["details"])
     if name == "patients":
-        for child in ("documents", "facts", "drafts", "activity"):
+        for child in ("documents", "facts", "drafts", "activity", "medications", "measures", "follow_ups"):
             record["related"][child] = list_records(child, patient_uid=uid, limit=500)["rows"]
         log("opened patient", internal(name, uid))
     elif name == "documents":
@@ -711,21 +783,62 @@ def internal_patient(name, uid):
         return patient_of(db, name, internal_id(db, name, uid))
 
 
+CREATED_BY_HAND = ("patients", "medications", "measures", "follow_ups")
+
+
 def create_record(name, fields, parent_uid=None):
-    """Create a patient (or a note, via add_note). Returns the new record ID."""
-    if name != "patients":
+    """Create a patient, or a medication, measure or follow-up for the patient parent_uid. Returns the new record ID.
+    (Documents come in through uploads and notes, and facts and drafts are made by MindChart.)"""
+    if name not in CREATED_BY_HAND:
         raise ValueError(f"New {OBJECTS[name]['plural'].lower()} are added from a patient's page")
     values = clean_fields(name, fields, creating=True)
-    values["status"] = values.get("status") or "Active"
-    values["record_type"] = values.get("record_type") or list(fieldtypes.DEFAULT_RECORD_TYPES["patients"])[0]
-    values["created"] = now()
-    # The record type's own fields can arrive grouped under "custom" or (from the command bar) mixed in.
-    incoming = {**{k: v for k, v in fields.items() if k not in values}, **(fields.get("custom") or {})}
-    values["custom"] = json.dumps(clean_custom(name, values["record_type"], incoming))
+    defaults = {"patients": {"status": "Active", "record_type": list(fieldtypes.DEFAULT_RECORD_TYPES["patients"])[0]},
+                "medications": {"status": "Active"}, "follow_ups": {"status": "Open"}}.get(name, {})
+    values.update({k: v for k, v in defaults.items() if not values.get(k)})
+    if name == "patients":
+        values["created"] = now()
+    if name == "measures":
+        check_measure(values, fields)
+    if name == "medications" and fields.get("source"):  # where a medication suggested from the records was found
+        values["source"] = str(fields["source"])[:300]
+    type_field = fieldtypes.RECORD_TYPE_FIELD.get(name)
+    if type_field:
+        # The record type's own fields can arrive grouped under "custom" or (from the command bar) mixed in.
+        incoming = {**{k: v for k, v in fields.items() if k not in values and k != "custom"}, **(fields.get("custom") or {})}
+        values["custom"] = json.dumps(clean_custom(name, values[type_field], incoming))
     with connect() as db:
+        if OBJECTS[name].get("parent"):
+            if not parent_uid:
+                raise ValueError("Choose the patient this is for")
+            values["patient_id"] = internal_id(db, "patients", parent_uid)
         row_id, uid = insert(db, name, values)
-    log("created patient", row_id, uid)
+        patient_id = row_id if name == "patients" else values["patient_id"]
+    title = values.get(OBJECTS[name]["title_field"]) or ""
+    log(f"created {OBJECTS[name]['label'].lower()}", patient_id, uid if name == "patients" else f"{uid}: {title}")
     return uid
+
+
+def check_measure(values, fields):
+    """A scale's total must be within its range; vitals get their BMI worked out from height and weight."""
+    measure, score = values["measure"], values.get("score")
+    highest = fieldtypes.MEASURE_MAX.get(measure)
+    if score not in (None, ""):
+        try:
+            values["score"] = fieldtypes.coerce({"type": "number", "label": "Total score"}, score)
+        except ValueError:
+            raise ValueError("The total score must be a number")
+        if values["score"] < 0 or (highest is not None and values["score"] > highest):
+            raise ValueError(f"A {measure} total is between 0 and {highest}")
+    elif measure in fieldtypes.MEASURE_MAX:
+        raise ValueError("Enter the total score")
+    if measure == "Vitals":
+        custom = fields.setdefault("custom", {})
+        try:
+            weight, height = float(custom.get("weight_lb") or 0), float(custom.get("height_in") or 0)
+        except ValueError:
+            return
+        if weight and height and not custom.get("bmi"):
+            custom["bmi"] = round(703 * weight / height ** 2, 1)
 
 
 def update_record(name, uid, fields):
@@ -981,6 +1094,99 @@ def onboarding():
     return {"steps": steps, "hidden": bool(hidden and hidden[0] == "hidden")}
 
 
+# --- Coming up, the timeline, and medications from the records ---------------------
+
+def coming_up(days=45):
+    """What's due soon (or overdue) across all patients, soonest first: open follow-ups, court orders expiring, IEP
+    annual reviews, planned discharges, and medications still waiting for consent (which have no date, so come last)."""
+    today = datetime.date.today()
+    horizon, recent = today + datetime.timedelta(days=days), today - datetime.timedelta(days=30)
+    items = []
+
+    def add(date, row, text, kind, record_id, follow_up=False):
+        items.append({"date": date.isoformat() if date else "", "when": date.strftime("%m/%d/%Y") if date else "",
+                      "days": (date - today).days if date else None, "patient": row["patient"],
+                      "patient_id": row["patient_id"], "text": text, "kind": kind, "id": record_id, "follow_up": follow_up})
+
+    with connect() as db:
+        for r in db.execute("SELECT * FROM follow_ups_view WHERE status = 'Open'"):
+            date = fieldtypes.parse_date(r["due"])
+            if date is None or date <= horizon:
+                add(date, r, r["title"], r["category"] or "Follow-up", r["id"], follow_up=True)
+        for r in db.execute("SELECT * FROM documents_view WHERE document_type IN ('Court Order', 'Individualized Education Program (IEP)')"):
+            custom = json.loads(r["details"] or "{}")
+            if r["document_type"] == "Court Order":
+                date, text, kind = fieldtypes.parse_date(custom.get("expires")), "Court order expires", "Court"
+            else:
+                meeting = fieldtypes.parse_date(custom.get("meeting_date"))
+                date, text, kind = (meeting.replace(year=meeting.year + 1) if meeting and not (meeting.month == 2 and meeting.day == 29)
+                                    else None), "IEP annual review due (a year after the last meeting)", "School / IEP"
+            if date and recent <= date <= horizon:
+                add(date, r, text, kind, r["id"])
+        for r in db.execute("SELECT p.uid AS patient_id, p.name AS patient, p.custom FROM patients p WHERE p.status = 'Active'"):
+            custom = json.loads(r["custom"] or "{}")
+            for key in ("expected_discharge", "planned_discharge"):
+                date = fieldtypes.parse_date(custom.get(key))
+                if date and recent <= date <= horizon:
+                    add(date, r, "Planned discharge", "Discharge", r["patient_id"])
+        for r in db.execute("SELECT * FROM medications_view WHERE status IN ('Active', 'Planned') "
+                            "AND consent IN ('Requested', 'Not yet requested')"):
+            add(None, r, f"Consent {'requested' if r['consent'] == 'Requested' else 'needed'} for {r['name']}", "Consent", r["id"])
+    return sorted(items, key=lambda i: (i["date"] == "", i["date"]))
+
+
+def timeline(patient_uid):
+    """A patient's history in date order: dated facts from their documents (verified ones only), documents,
+    medications started and stopped, measures, follow-ups and admission. Partial dates ("March 2019") count."""
+    events = []
+
+    def add(when, kind, text, record_id, source="", section=""):
+        key = fieldtypes.date_key(when)
+        if key:
+            events.append({"key": key, "when": when, "kind": kind, "text": text, "id": record_id, "source": source,
+                           "section": section})
+
+    with connect() as db:
+        patient = db.execute("SELECT * FROM patients WHERE uid = ?", (patient_uid,)).fetchone()
+        if not patient:
+            raise ValueError(f"No patient with ID {patient_uid}")
+        add(patient["dob"], "birth", "Born", patient_uid)
+        custom = json.loads(patient["custom"] or "{}")
+        for key, text in (("admission_date", f"Admitted ({patient['record_type']})"), ("placement_date", "Placed in foster home")):
+            add(custom.get(key), "placement", text, patient_uid)
+        for f in db.execute("""SELECT f.uid, f.fact, f.date, f.section, d.name AS document FROM facts f
+                               JOIN documents d ON d.id = f.document_id WHERE d.patient_id = ? AND f.verified = 1""", (patient["id"],)):
+            add(f["date"], "fact", f["fact"], f["uid"], f["document"], f["section"])
+        for d in db.execute("SELECT uid, name, document_type, document_date FROM documents WHERE patient_id = ?", (patient["id"],)):
+            add(d["document_date"], "document", f"{d['document_type'] or 'Document'}: {d['name']}", d["uid"])
+        for m in db.execute("SELECT * FROM medications WHERE patient_id = ?", (patient["id"],)):
+            dose = " ".join(x for x in (m["dose"], m["frequency"]) if x)
+            add(m["start_date"], "medication", f"Started {m['name']}{' ' + dose if dose else ''}", m["uid"])
+            add(m["stop_date"], "medication", f"Stopped {m['name']}{': ' + m['stop_reason'] if m['stop_reason'] else ''}", m["uid"])
+        for m in db.execute("SELECT * FROM measures WHERE patient_id = ?", (patient["id"],)):
+            band = fieldtypes.measure_band(m["measure"], m["score"])
+            score = f" {fieldtypes.display(m['score'])}" if m["score"] not in (None, "") else ""
+            add(m["date"], "measure", f"{m['measure']}{score}{' (' + band + ')' if band else ''}", m["uid"])
+        for f in db.execute("SELECT * FROM follow_ups WHERE patient_id = ?", (patient["id"],)):
+            add(f["due"], "follow_up", f"{'Done' if f['status'] == 'Done' else 'Due'}: {f['title']}", f["uid"])
+    seen, unique = set(), []
+    for e in sorted(events, key=lambda e: e["key"]):
+        signature = (e["key"], e["text"].lower().strip(" ."))  # the same fact read from two documents
+        if signature not in seen:
+            seen.add(signature)
+            unique.append(e)
+    return unique
+
+
+def medication_facts(patient_uid):
+    """The verified facts about medications in a patient's documents, for suggesting their medication list."""
+    with connect() as db:
+        return [dict(r) for r in db.execute(
+            """SELECT f.fact, f.date, f.quote, d.name AS document, d.document_type, d.document_date FROM facts f
+               JOIN documents d ON d.id = f.document_id JOIN patients p ON p.id = d.patient_id
+               WHERE p.uid = ? AND f.section = 'medications' AND f.verified = 1 ORDER BY d.id, f.id""", (patient_uid,))]
+
+
 def documents_for_history(patient_uid, doc_uids, reread):
     """The documents to build a history from, with facts saved from earlier runs unless reread is set.
 
@@ -1129,3 +1335,13 @@ def upgrade_to_v4(db):
 
 
 MIGRATIONS[4] = upgrade_to_v4
+
+
+def upgrade_to_v5(db):
+    """Version 5: medications, measures (rating scales and vitals) and follow-ups."""
+    for name in ("medications", "measures", "follow_ups"):
+        db.execute(table_sql(name))
+    seed_record_types(db)
+
+
+MIGRATIONS[5] = upgrade_to_v5

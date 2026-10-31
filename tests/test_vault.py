@@ -177,6 +177,59 @@ class Uploads(unittest.TestCase):
         self.assertEqual(self.vault.get_record("documents", doc)["record"]["document_type"], "Safety Plan (test)")
 
 
+class Clinical(unittest.TestCase):
+    """Medications, rating scales, follow-ups, what's coming up, and the timeline."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.vault = support.unlocked_vault()
+        cls.patient = cls.vault.create_record("patients", {"name": "Clinical Test (fictional)", "dob": "01/02/2012",
+                                                           "record_type": "Residential treatment", "custom": {"admission_date": "04/10/2024"}})
+
+    def test_scores_are_checked_and_bmi_is_worked_out(self):
+        with self.assertRaisesRegex(ValueError, "between 0 and 27"):
+            self.vault.create_record("measures", {"measure": "PHQ-A (depression)", "date": "10/01/2026", "score": 30}, self.patient)
+        with self.assertRaisesRegex(ValueError, "total score"):
+            self.vault.create_record("measures", {"measure": "GAD-7 (anxiety)", "date": "10/01/2026"}, self.patient)
+        vitals = self.vault.create_record("measures", {"measure": "Vitals", "date": "10/01/2026",
+                                                       "custom": {"weight_lb": "100", "height_in": "60"}}, self.patient)
+        self.assertEqual(self.vault.get_record("measures", vitals)["custom"]["bmi"], 19.5)
+        with self.assertRaisesRegex(ValueError, "patient"):
+            self.vault.create_record("follow_ups", {"title": "No patient"})
+
+    def test_lists_are_in_date_order(self):
+        for date, score in (("09/01/2026", 9), ("01/15/2026", 15), ("12/01/2025", 20)):
+            self.vault.create_record("measures", {"measure": "PHQ-A (depression)", "date": date, "score": score}, self.patient)
+        dates = [r["date"] for r in self.vault.list_records("measures", patient_uid=self.patient)["rows"] if r["measure"].startswith("PHQ")]
+        self.assertEqual(dates, ["09/01/2026", "01/15/2026", "12/01/2025"])  # newest first, across years
+
+    def test_coming_up_collects_whats_due(self):
+        import datetime
+        soon = (datetime.date.today() + datetime.timedelta(days=5)).strftime("%m/%d/%Y")
+        far = (datetime.date.today() + datetime.timedelta(days=200)).strftime("%m/%d/%Y")
+        due = self.vault.create_record("follow_ups", {"title": "Court report", "due": soon}, self.patient)
+        later = self.vault.create_record("follow_ups", {"title": "Far away", "due": far}, self.patient)
+        med = self.vault.create_record("medications", {"name": "Sertraline", "consent": "Requested"}, self.patient)
+        items = {i["id"]: i for i in self.vault.coming_up()}
+        self.assertEqual(items[due]["days"], 5)
+        self.assertNotIn(later, items)
+        self.assertEqual(items[med]["text"], "Consent requested for Sertraline")
+        self.vault.update_record("follow_ups", due, {"status": "Done"})
+        self.assertNotIn(due, {i["id"] for i in self.vault.coming_up()})
+
+    def test_the_timeline_puts_history_in_order(self):
+        self.vault.create_record("medications", {"name": "Guanfacine", "start_date": "March 2021", "stop_date": "05/01/2024",
+                                                 "stop_reason": "Changed to ER", "status": "Stopped"}, self.patient)
+        texts = [e["text"] for e in self.vault.timeline(self.patient)]
+        self.assertEqual(texts[0], "Born")
+        self.assertLess(texts.index("Started Guanfacine"), texts.index("Admitted (Residential treatment)"))
+        self.assertLess(texts.index("Admitted (Residential treatment)"), texts.index("Stopped Guanfacine: Changed to ER"))
+
+    def test_documents_can_be_searched_by_their_text(self):
+        doc = self.vault.add_document(self.patient, "scan.pdf", b"%PDF", [{"page": 1, "text": "Mentions zolpidem once.", "scanned": False}])
+        self.assertIn(doc, [r["id"] for r in self.vault.list_records("documents", "zolpidem")["rows"]])
+
+
 class GettingStarted(unittest.TestCase):
     def test_the_checklist_ticks_off_features_as_they_are_tried(self):
         vault = support.unlocked_vault()

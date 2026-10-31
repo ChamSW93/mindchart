@@ -8,45 +8,18 @@ Two passes:
 
 Nothing is filed until the clinician confirms it on the upload's review card.
 """
-import datetime
 import re
 
 import history
 import learning
 import vault
+from fields import parse_date
 
-MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "fictional"}
 SEARCH_CHARS = 6000  # how much of the opening text is searched for patients' names and birth dates
 
 
 # --- Dates and names --------------------------------------------------------------
-
-def parse_date(text):
-    """A date written in any common way (03/04/2011, 3-4-11, 2011-03-04, March 4, 2011, 4 Mar 2011), or None."""
-    text = (text or "").strip().lower()
-    m = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text)
-    if m:
-        year, month, day = map(int, m.groups())
-    elif re.search(r"\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b", text):
-        month, day, year = map(int, re.search(r"\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})\b", text).groups())
-    else:
-        m = (re.search(r"\b([a-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b", text)
-             or re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([a-z]{3})[a-z]*\.?,?\s+(\d{4})\b", text))
-        if not m:
-            return None
-        first, second, year = m.groups()
-        month_name, day = (first, second) if first.isalpha() else (second, first)
-        if month_name not in MONTHS:
-            return None
-        month, day, year = MONTHS[month_name], int(day), int(year)
-    if year < 100:  # two-digit years: the most recent past one (birth dates are never in the future)
-        year += 2000 if year <= datetime.date.today().year % 100 else 1900
-    try:
-        return datetime.date(year, month, day)
-    except ValueError:
-        return None
-
 
 def name_parts(name):
     """(first, last) in lower case. Handles "Rivera, Jordan", middle names and initials, and suffixes."""

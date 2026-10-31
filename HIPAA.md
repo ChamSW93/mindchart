@@ -34,13 +34,14 @@ Nothing is sent over the internet. Updates download code only, and never upload 
 
 - **Its own window, not a web browser.** Browser extensions can read and transmit anything on a web page. MindChart runs in its own app window, so extensions never see patient data.
 - **The AI can't change records on its own.** Plain-English questions run as read-only database queries. Requests to add or change records come back as a proposal the clinician reviews and saves. Uploaded files are filed under a patient only after the clinician confirms the patient and the document type.
+- **Clinical tools stay advisory.** Score bands are the scales' published cutoffs, shown alongside the score; Coming up only lists dates; medication suggestions and visit notes are drafts the clinician checks, edits and saves. Nothing is saved, prescribed or sent without the clinician.
 - **Wrong-patient checks.** Each upload is matched to patients by name, date of birth and MRN. A file dropped on one patient's page that names a different child (a sibling, say) gets a warning before it can be filed.
 - **Uploads and learning stay in the encrypted store.** Files waiting for review are kept inside the encrypted store, and a discarded upload is wiped from it. The examples MindChart learns document types from (each confirmed document's type and opening text) are kept there too, are deleted along with their document, and never leave the Mac.
 - **Background reading doesn't keep records open.** Reading confirmed documents in the background doesn't count as activity, so MindChart still locks itself after 15 minutes alone. Reading pauses while locked.
 - **Error logs contain no record contents.** `~/Library/Logs/MindChart` records what failed and where in the code, so it's safe to send to the developer.
 - **Updates are code-only and verified.** Updates download from GitHub over HTTPS, are checked against a published SHA-256 checksum, replace only the app's files, and never touch the encrypted store. They never upload anything.
 - **Deleting is thorough.** Deleting a patient removes their documents, facts and drafts, and the database is rewritten so deleted records don't linger in free space.
-- **Tested before every release.** An automated test suite (90 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
+- **Tested before every release.** An automated test suite (101 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
 
 ## What the organization is responsible for
 

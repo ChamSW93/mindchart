@@ -294,8 +294,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return vault.list_records(args[0], query.get("search", ""), query.get("patient"))
         if is_("GET", "records", "*", "*"):
             return vault.get_record(*args)
-        if is_("POST", "records", "*"):
-            return {"id": vault.create_record(args[0], data)}
+        if is_("POST", "records", "*"):  # medications, measures and follow-ups name their patient in "patient_id"
+            return {"id": vault.create_record(args[0], data, data.get("patient_id"))}
         if is_("POST", "records", "*", "*"):
             vault.update_record(args[0], args[1], data)
             return vault.get_record(*args)
@@ -321,7 +321,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if is_("GET", "work"):
             return worker.status()
         if is_("POST", "patients", "*", "notes"):
-            return {"id": vault.add_note(args[0], data.get("text", ""), data.get("date", ""), data.get("author", ""))}
+            return {"id": vault.add_note(args[0], data.get("text", ""), data.get("date", ""), data.get("author", ""),
+                                         data.get("title", ""))}
+        if is_("GET", "patients", "*", "timeline"):
+            return {"events": vault.timeline(args[0])}
+        if is_("POST", "patients", "*", "medications", "suggest"):  # a medication list drafted from the records
+            model, thinking = model_choice(data)
+            have = {m["name"].lower() for m in vault.list_records("medications", patient_uid=args[0])["rows"]}
+            suggestions = history.suggest_medications(model, thinking, vault.medication_facts(args[0]))
+            return {"suggestions": [m for m in suggestions if m["name"].lower() not in have]}
+        if is_("POST", "patients", "*", "visit-note"):  # a visit note drafted from the clinician's own notes
+            model, thinking = model_choice(data)
+            vault.internal("patients", args[0])  # the patient must exist
+            return history.draft_visit_note(model, thinking, data.get("inputs", ""))
+        if is_("GET", "coming-up"):
+            return {"items": vault.coming_up()}
         if is_("POST", "patients", "*", "history"):
             return self.build_history(args[0], data)
         if is_("POST", "drafts", "*"):

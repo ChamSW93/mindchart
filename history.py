@@ -290,6 +290,68 @@ def fill_fields(model, thinking, doc, definitions):
     return filled
 
 
+MEDICATIONS_PROMPT = """You help a psychiatric nurse practitioner build a patient's medication list from their records.
+From the numbered facts, list each medication trial (one entry per medication; a dose change of the same medication
+stays one entry, described in "dose" and "response"). Rules:
+- Only what the facts state. Never guess doses, dates or reasons. Leave anything not stated as "".
+- "status": "Active" if the latest facts say it's current, "Stopped" if they say it was stopped, otherwise "Unknown".
+- "dose": the most recent dose stated (earlier doses go in "response"), without how often. "frequency": how often.
+- Dates exactly as written. "response": response, side effects and dose changes as stated.
+- "facts": the numbers of the facts each entry comes from (at least one).
+Psychotherapy, counseling and other services are not medications."""
+
+
+def suggest_medications(model, thinking, facts):
+    """A medication list drafted from a patient's medication facts, for the clinician to check and add.
+    facts: [{"fact", "date", "document", "document_date"}]. Returns entries citing the facts they came from."""
+    if not facts:
+        return []
+    numbered = "\n".join(f"[{n}] ({f['document']}, {f['document_date'] or 'undated'}{'; happened: ' + f['date'] if f['date'] else ''}) "
+                         f"{f['fact']}" for n, f in enumerate(facts, 1))
+    text = {"type": "string", "maxLength": 300}
+    schema = {"type": "object", "properties": {"medications": {"type": "array", "items": {"type": "object", "properties": {
+        "name": {"type": "string", "maxLength": 80}, "dose": text, "frequency": text, "target": text,
+        "status": {"type": "string", "enum": ["Active", "Stopped", "Unknown"]}, "start_date": {"type": "string", "maxLength": 40},
+        "stop_date": {"type": "string", "maxLength": 40}, "stop_reason": text, "response": {"type": "string", "maxLength": 600},
+        "facts": {"type": "array", "minItems": 1, "items": {"type": "integer"}}},
+        "required": ["name", "dose", "frequency", "target", "status", "start_date", "stop_date", "stop_reason", "response", "facts"]}}},
+        "required": ["medications"]}
+    reply = ask(model, thinking, MEDICATIONS_PROMPT, f"Facts:\n{numbered}", schema, max_tokens=4000)
+    suggestions = []
+    for item in reply.get("medications", []):
+        cited = [facts[n - 1] for n in item.get("facts", []) if 0 < n <= len(facts)]
+        if not item.get("name", "").strip() or not cited:
+            continue  # every suggestion must come from the records
+        sources = list(dict.fromkeys(f"{f['document']}{' (' + f['document_date'] + ')' if f['document_date'] else ''}" for f in cited))
+        suggestions.append({**{k: item.get(k, "") for k in ("name", "dose", "frequency", "target", "start_date", "stop_date",
+                                                              "stop_reason", "response")},
+                            "status": item["status"] if item.get("status") in ("Active", "Stopped") else "",
+                            "source": "; ".join(sources), "quotes": [f["fact"] for f in cited]})
+    return suggestions
+
+
+NOTE_PROMPT = """You help a child and adolescent psychiatric nurse practitioner write up a visit. Write the note from ONLY
+the clinician's notes below, in four parts: "subjective" (what the youth, staff and guardians report since the last
+visit), "objective" (the mental status exam as written, then current medications and any scores), "assessment" and
+"plan". Rules:
+- Never add symptoms, findings, diagnoses, doses, risk statements or plans that aren't in the clinician's notes.
+- Keep every detail given: names, doses, dates, scores, quotes.
+- Clear, concise clinical prose in the third person, referring to the patient as "the patient" or by first name.
+- The clinician may write assessment and plan together: put their clinical impression in "assessment" and the actions
+  (medications, monitoring, follow-up) in "plan", without repeating anything between the two.
+- Don't start a part with its own label (no "Subjective:" or "Since the last visit:").
+- If a part has nothing in the notes, write "Not documented." for it."""
+
+
+def draft_visit_note(model, thinking, inputs):
+    """A visit note drafted from the clinician's own notes. inputs: plain text of everything they entered.
+    Returns {"subjective", "objective", "assessment", "plan"}."""
+    part = {"type": "string", "maxLength": 4000}
+    schema = {"type": "object", "properties": {"subjective": part, "objective": part, "assessment": part, "plan": part},
+              "required": ["subjective", "objective", "assessment", "plan"]}
+    return ask(model, thinking, NOTE_PROMPT, inputs, schema, max_tokens=4000)
+
+
 def extract_facts(model, thinking, doc, chunk):
     """The facts in one part of a document. If the answer runs too long, read each half separately.
 
@@ -522,7 +584,8 @@ def join_sentences(sentences, usable, documents):
     """
     parts = []
     for sentence in sentences:
-        text = re.sub(r"\s*\[[\d,\s]+\]", "", sentence.get("text", "")).strip()  # drop any [n] the model wrote itself
+        # Drop fact numbers the model wrote itself, like "[3]" or "(fact 2)" or "(facts 1 and 4)"; MindChart adds sources.
+        text = re.sub(r"\s*(\[[\d,\s]+\]|\((?:facts?|fact\s*#)\s*[\d,\s]+(?:and\s*\d+)?\))", "", sentence.get("text", "")).strip()
         if not text:
             continue
         labels = list(dict.fromkeys(cite(usable[n - 1], documents) for n in sentence.get("facts", []) if 0 < n <= len(usable)))

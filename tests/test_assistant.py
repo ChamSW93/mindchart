@@ -78,6 +78,20 @@ class Assistant(unittest.TestCase):
         done = assistant.confirm(proposal)
         self.assertEqual(self.vault.get_record("patients", done["id"])["custom"]["cottage"], "Cottage 4")
 
+    def test_scores_medications_and_follow_ups_can_be_logged(self):
+        item = lambda **values: {**{f: "" for f in assistant.ITEM_FIELDS}, **values}
+        self.replies = [{"intent": "add_measure", "patient": self.patient, "item": item(measure="PHQ-A", score="11", date="10/30/2026")}]
+        proposal = assistant.handle("Quinn's PHQ-A was 11 today", "m", False, "MindChart")
+        self.assertEqual(proposal["fields"]["measure"], "PHQ-A (depression)")  # matched to the full name
+        done = assistant.confirm(proposal)
+        self.assertEqual(self.vault.get_record("measures", done["id"])["record"]["score"], 11)
+        self.replies = [{"intent": "add_follow_up", "patient": self.patient,
+                         "item": item(title="Renew medication consent", due="12/01/2026", category="Consent")}]
+        done = assistant.confirm(assistant.handle("Remind me to renew Quinn's consent by 12/01", "m", False, "MindChart"))
+        self.assertEqual(self.vault.get_record("follow_ups", done["id"])["record"]["status"], "Open")
+        self.replies = [{"intent": "add_medication", "patient": self.patient, "item": item(dose="25 mg")}]
+        self.assertEqual(assistant.handle("Quinn started 25 mg", "m", False, "MindChart")["kind"], "message")  # no name: ask
+
     def test_update_ignores_a_repeated_name(self):
         self.replies = [{"intent": "update_patient", "patient": self.patient,
                          "patient_fields": {**{f: "" for f in assistant.PATIENT_FIELDS}, "name": "Quinn Assistant (fictional)",
