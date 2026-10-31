@@ -8,7 +8,7 @@ Everything runs on the Mac. The app, its server and the AI model (through [Ollam
 
 ## Installing
 
-See [TESTING.md](TESTING.md). In short, paste this into Terminal on an Apple Silicon Mac with macOS 12 or newer and 16 GB or more:
+See [TESTING.md](TESTING.md). In short, paste this into Terminal on an Apple Silicon Mac with macOS 12 or newer and 8 GB or more (16 GB or more recommended):
 
 ```
 curl -fsSL https://raw.githubusercontent.com/ChamSW93/mindchart/main/install.sh | bash
@@ -97,6 +97,8 @@ macOS "Reduce motion" turns animations off. Other downloaded models can be picke
 | bonsai-2:27b | 31 / 32 | Yes | 37 min | 8.6 GB |
 | mistral-nemo | 28 / 32 | No | 18 min | 9.7 GB |
 | bonsai-2:9b | 28 / 32 | Yes | 11 min | 3.1 GB |
+
+**On 8 GB**, the GPU gets about 5.4 GB, so MindChart uses bonsai-2:9b (3.1 GB): the fastest of these, finding 28 of 32 key facts and catching the contradiction. It works best with other apps closed, since macOS, the browser and the model share the same 8 GB.
 
 **On 24 GB or more**, gpt-oss:20b (13 GB) found 27 to 32 of 32 key facts across six runs, caught the contradiction every time, and took 11 to 15 minutes.
 

@@ -6,7 +6,7 @@ Thank you for trying MindChart! It's an early version, so rough edges are expect
 
 ## What you need
 
-- A Mac with Apple Silicon (M1 or newer), macOS 12 (Monterey) or newer, and at least 16 GB of memory
+- A Mac with Apple Silicon (M1 or newer), macOS 12 (Monterey) or newer, and at least 8 GB of memory. 16 GB or more is better: on 8 GB, MindChart uses a smaller, faster AI model that finds a little less, and it runs best with other apps (like Zoom or a busy web browser) closed
 - About 20 GB of free disk space
 - An internet connection for installing (MindChart itself works offline afterwards)
 
