@@ -1,4 +1,5 @@
 """The command bar, with the AI model replaced by canned replies."""
+import datetime
 import unittest
 
 import support
@@ -89,6 +90,39 @@ class Assistant(unittest.TestCase):
         self.assertEqual(self.vault.get_record("patients", done["id"])["custom"]["cottage"], "Collins")  # the list's spelling
         self.assertIn("Added Maria Test (fictional)", done["text"])
         self.assertIn("name", assistant.SCHEMA["properties"]["patient_fields"]["properties"])  # the model can give the name
+
+    def test_an_incident_names_everyone_and_offers_records_for_new_youths(self):
+        janno = self.vault.create_record("patients", {"first_name": "Janno", "last_name": "Test (fictional)"})
+        self.vault.create_record("patients", {"first_name": "Erica", "last_name": "Test (fictional)"})  # "Eric" isn't her
+        self.vault.create_record("patients", {"first_name": "Sam", "last_name": "One (fictional)"})
+        self.vault.create_record("patients", {"first_name": "Sam", "last_name": "Two (fictional)"})
+        incident = {**{f: "" for f in assistant.INCIDENT_FIELDS}, "title": "Altercation between Eric and Janno", "type": "Physical aggr",
+                    "injuries": "Eric had mild wounds.", "severity": "Minor", "date": "10/30/2026"}
+        self.replies = [{"intent": "add_incident", "explanation": "An incident.", "incident": incident, "people": ["Eric", "Janno", "Sam"]}]
+        proposal = assistant.handle("Eric had mild wounds from the incident with Janno and Sam", "m", False, "MindChart")
+        self.assertEqual(proposal["action"], "add_incident")
+        people = proposal["fields"]["people"]
+        self.assertEqual(people[0], {"id": "new:Eric|", "name": "Eric (new patient)"})  # not on file: offered as a new record
+        self.assertEqual(people[1]["id"], janno)
+        self.assertEqual([u["name"] for u in proposal["unsure"]], ["Sam"])  # two Sams: the person chooses
+        self.assertEqual(proposal["fields"]["type"], "Physical aggression")
+        # The page makes Eric's record first, then saves the incident linked to both
+        eric = self.vault.create_record("patients", {"first_name": "Eric", "last_name": ""})
+        done = assistant.confirm({**proposal, "fields": {**proposal["fields"], "people": [eric, janno]}})
+        record = self.vault.get_record("incidents", done["id"])
+        self.assertEqual(sorted(p["id"] for p in record["people"]), sorted([eric, janno]))
+        self.assertEqual(self.vault.get_record("patients", janno)["related"]["incidents"][0]["id"], done["id"])
+
+    def test_an_incident_keeps_only_the_date_time_and_severity_said(self):
+        made_up = {**{f: "" for f in assistant.INCIDENT_FIELDS}, "title": "AWOL", "date": "01/01/2020", "time": "22:00", "severity": "Moderate"}
+        reply = {"intent": "add_incident", "incident": made_up, "people": ["Quinn Assistant"]}
+        self.replies = [reply]
+        fields = assistant.handle("Quinn ran away last night", "m", False, "MindChart")["fields"]
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%m/%d/%Y")
+        self.assertEqual((fields.get("date"), fields.get("time"), fields.get("severity")), (yesterday, None, None))
+        self.replies = [reply]
+        fields = assistant.handle("Quinn had a minor scrape at 3:15 pm", "m", False, "MindChart")["fields"]
+        self.assertEqual((fields.get("date"), fields.get("time"), fields.get("severity")), (None, "22:00", "Minor"))
 
     def test_scores_medications_and_follow_ups_can_be_logged(self):
         item = lambda **values: {**{f: "" for f in assistant.ITEM_FIELDS}, **values}

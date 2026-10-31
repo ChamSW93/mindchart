@@ -53,7 +53,7 @@ MindChart starts with a short tour of each part of the app. Take it (or skip it,
    - *Remind me to renew Jordan's medication consent by 12/01*
    - *Who is on sertraline?*
 9. Browse **Patients**, **Guardians**, **Documents** and **Facts**, open a record and **Edit** it. Give a patient one or more legal guardians (choose **New guardian…** to add one) and a guardian's ZIP code, and try typing a date or picking one from the calendar in the box.
-10. Add a medication from the list (try typing a brand name), and look at **Medications → By medication**.
+10. Add a medication from the list (try typing a brand name, and choose how often), and look at **Medications → By medication**. In the bar at the top, describe an incident between two youths, one of them not on file (say, *Eric had mild wounds from the incident with Jordan*), and check what MindChart proposes.
 11. Put a few fictional patients in a cottage, open it under **Cottages**, and try **Analyze with AI** (experimental). Tell it what was helpful or not.
 12. Click **Lock MindChart**, then sign back in.
 

@@ -52,7 +52,7 @@ MOUNT = HOME / ".unlocked"
 DATABASE = MOUNT / "records.db"
 AUTO_LOCK_MINUTES = 15
 MIN_PASSWORD_LENGTH = 10
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 BACKUPS_KEPT = 5
 MAX_ATTEMPTS = 5  # wrong passwords allowed before MindChart makes you wait
 
@@ -82,6 +82,10 @@ EXAMPLES_TABLE = """CREATE TABLE IF NOT EXISTS type_examples (
 GUARDIANSHIPS_TABLE = """CREATE TABLE IF NOT EXISTS guardianships (
     patient_id INTEGER REFERENCES patients(id) ON DELETE CASCADE, guardian_id INTEGER REFERENCES patients(id) ON DELETE CASCADE,
     PRIMARY KEY (patient_id, guardian_id));"""
+# Who was involved in each incident (any number of patients); links go when the incident or the patient is deleted.
+INCIDENT_PEOPLE_TABLE = """CREATE TABLE IF NOT EXISTS incident_people (
+    incident_id INTEGER REFERENCES incidents(id) ON DELETE CASCADE, patient_id INTEGER REFERENCES patients(id) ON DELETE CASCADE,
+    role TEXT, PRIMARY KEY (incident_id, patient_id));"""
 # The AI's experimental readings of a cottage's dynamics (cottage_id) or of all the cottages together (no cottage_id),
 # with the clinician's feedback on each, which guides later readings. A cottage's go when it's deleted.
 COTTAGE_ANALYSES_TABLE = """CREATE TABLE IF NOT EXISTS cottage_analyses (
@@ -163,7 +167,7 @@ OBJECTS = {
         "fields": [
             {"name": "name", "label": "Medication", "type": "text", "required": True},
             {"name": "dose", "label": "Dose", "type": "text"},
-            {"name": "frequency", "label": "How often", "type": "text"},
+            {"name": "frequency", "label": "How often", "type": "text", "suggest": fieldtypes.FREQUENCIES},
             {"name": "target", "label": "For (target symptoms)", "type": "text"},
             {"name": "status", "label": "Status", "type": "picklist", "options": ["Active", "Stopped", "Planned"]},
             {"name": "start_date", "label": "Started", "type": "date"},
@@ -210,6 +214,25 @@ OBJECTS = {
             {"name": "created", "label": "Created", "type": "datetime", "edit": False},
         ],
     },
+    # Incidents: events involving one or more youths (a fight, an injury, running away), linked to everyone involved.
+    "incidents": {
+        "label": "Incident", "plural": "Incidents", "prefix": "INC", "title_field": "title",
+        "fields": [
+            {"name": "title", "label": "What happened, in brief", "type": "text", "required": True},
+            {"name": "date", "label": "Date", "type": "date"},
+            {"name": "time", "label": "Time", "type": "text"},
+            {"name": "type", "label": "Type", "type": "picklist", "options": fieldtypes.INCIDENT_TYPES},
+            {"name": "severity", "label": "Severity", "type": "picklist", "options": ["Minor", "Moderate", "Serious"]},
+            # Links to the patients involved, kept in the incident_people table rather than a column
+            {"name": "people", "label": "Youths involved", "type": "people", "record_type": "Patient", "virtual": True},
+            {"name": "location", "label": "Where", "type": "text"},
+            {"name": "description", "label": "Account", "type": "longtext"},
+            {"name": "injuries", "label": "Injuries", "type": "longtext"},
+            {"name": "response", "label": "Staff response", "type": "longtext"},
+            {"name": "reported_by", "label": "Reported by", "type": "text"},
+            {"name": "created", "label": "Created", "type": "datetime", "edit": False},
+        ],
+    },
     "activity": {
         "label": "Activity", "plural": "Activity", "prefix": "ACT", "title_field": "action",
         "fields": [
@@ -248,7 +271,8 @@ def table_sql(name):
 # Views with patient and document details joined in, used by lists, search and the assistant.
 VIEWS = """
 DROP VIEW IF EXISTS people_view; DROP VIEW IF EXISTS patients_view; DROP VIEW IF EXISTS guardians_view;
-DROP VIEW IF EXISTS guardianships_view; DROP VIEW IF EXISTS cottages_view;
+DROP VIEW IF EXISTS guardianships_view; DROP VIEW IF EXISTS cottages_view; DROP VIEW IF EXISTS incidents_view;
+DROP VIEW IF EXISTS incident_people_view;
 DROP VIEW IF EXISTS documents_view; DROP VIEW IF EXISTS facts_view;
 DROP VIEW IF EXISTS drafts_view; DROP VIEW IF EXISTS activity_view; DROP VIEW IF EXISTS medications_view;
 DROP VIEW IF EXISTS measures_view; DROP VIEW IF EXISTS follow_ups_view;
@@ -271,6 +295,14 @@ CREATE VIEW cottages_view AS
            (SELECT COUNT(*) FROM patients p WHERE p.record_type = 'Patient' AND COALESCE(p.status, '') != 'Discharged'
             AND json_extract(p.custom, '$.cottage') = c.name) AS residents, c.notes, c.created
     FROM cottages c;
+CREATE VIEW incidents_view AS
+    SELECT i.uid AS id, i.title, i.date, i.time, i.type, i.severity,
+           (SELECT group_concat(p.name, ', ') FROM incident_people l JOIN patients p ON p.id = l.patient_id
+            WHERE l.incident_id = i.id) AS people, i.location, i.description, i.injuries, i.response, i.reported_by, i.created
+    FROM incidents i;
+CREATE VIEW incident_people_view AS
+    SELECT i.uid AS incident_id, i.title AS incident, i.date, i.type, p.uid AS patient_id, p.name AS patient
+    FROM incident_people l JOIN incidents i ON i.id = l.incident_id JOIN patients p ON p.id = l.patient_id;
 CREATE VIEW guardianships_view AS
     SELECT p.uid AS patient_id, p.name AS patient, g.uid AS guardian_id, g.name AS guardian
     FROM guardianships gs JOIN patients p ON p.id = gs.patient_id JOIN patients g ON g.id = gs.guardian_id;
@@ -402,7 +434,7 @@ def prepare_database(db):
                 raise
         db.isolation_level = ""
     db.executescript("\n".join(table_sql(name) for name in OBJECTS) + SETTINGS_TABLE + FIELD_DEFS_TABLE
-                     + RECORD_TYPES_TABLE + UPLOADS_TABLE + EXAMPLES_TABLE + GUARDIANSHIPS_TABLE + COTTAGE_ANALYSES_TABLE + VIEWS)
+                     + RECORD_TYPES_TABLE + UPLOADS_TABLE + EXAMPLES_TABLE + GUARDIANSHIPS_TABLE + INCIDENT_PEOPLE_TABLE + COTTAGE_ANALYSES_TABLE + VIEWS)
     seed_field_defs(db)
     seed_record_types(db)
     seed_cottages(db)
@@ -802,7 +834,7 @@ def list_records(name, search="", patient_uid=None, limit=1000, record_type=None
         if patient_uid and "patient_id" in columns:
             where.append("patient_id = ?")
             args.append(patient_uid)
-        order = {"patients": "name COLLATE NOCASE", "cottages": "name COLLATE NOCASE", "documents": "added DESC", "facts": "document_date DESC, section",
+        order = {"patients": "name COLLATE NOCASE", "cottages": "name COLLATE NOCASE", "incidents": "created DESC", "documents": "added DESC", "facts": "document_date DESC, section",
                  "drafts": "created DESC", "activity": "seq DESC", "medications": "patient, name COLLATE NOCASE",
                  "measures": "patient", "follow_ups": "patient"}[name]
         rows = [dict(r) for r in db.execute(f"SELECT * FROM {view} {'WHERE ' + ' AND '.join(where) if where else ''} "
@@ -815,6 +847,8 @@ def list_records(name, search="", patient_uid=None, limit=1000, record_type=None
         rows.sort(key=lambda r: tuple(-x for x in later(r["date"])))
     elif name == "follow_ups":  # open ones first, soonest due first
         rows.sort(key=lambda r: (r["status"] == "Done", later(r["due"])))
+    elif name == "incidents":  # newest first
+        rows.sort(key=lambda r: tuple(-x for x in later(r["date"])))
     elif view == "guardians_view":  # each guardian's town and rough drive time, from their ZIP code
         for r in rows:
             found = zipcodes.place(json.loads(r["details"] or "{}").get("zip"))
@@ -844,7 +878,11 @@ def get_record(name, uid):
                 "SELECT guardian_id, guardian FROM guardianships_view WHERE patient_id = ? ORDER BY guardian", (uid,))]
         for child in ("documents", "facts", "drafts", "activity", "medications", "measures", "follow_ups"):
             record["related"][child] = list_records(child, patient_uid=uid, limit=500)["rows"]
+        record["related"]["incidents"] = patient_incidents(uid)
         log("opened patient", internal(name, uid))
+    elif name == "incidents":
+        with connect() as db:
+            record["people"] = incident_people(uid)
     elif name == "cottages":
         with connect() as db:
             residents = [dict(r) for r in db.execute(
@@ -869,6 +907,15 @@ def get_record(name, uid):
     return record
 
 
+def patient_incidents(uid):
+    """The incidents a patient was involved in, newest first, each naming who else was involved."""
+    with connect() as db:
+        rows = [dict(r) for r in db.execute(
+            "SELECT * FROM incidents_view WHERE id IN (SELECT incident_id FROM incident_people_view WHERE patient_id = ?)", (uid,))]
+    later = lambda text: fieldtypes.date_key(text) or (9999, 0, 0)
+    return sorted(rows, key=lambda r: tuple(-x for x in later(r["date"])))
+
+
 def internal(name, uid):
     with connect() as db:
         return internal_id(db, name, uid)
@@ -879,7 +926,7 @@ def internal_patient(name, uid):
         return patient_of(db, name, internal_id(db, name, uid))
 
 
-CREATED_BY_HAND = ("patients", "medications", "measures", "follow_ups", "cottages")
+CREATED_BY_HAND = ("patients", "medications", "measures", "follow_ups", "cottages", "incidents")
 
 
 def seed_cottages(db):
@@ -927,19 +974,24 @@ def person_values(db, values, current=None):
             raise ValueError("Enter a first or last name")
 
 
-def set_guardians(db, patient_id, uids):
-    """Link a patient to exactly these legal guardians (record IDs). Returns their guardians' names before and after."""
+# Fields that link a record to people: {field: (link table, the record's column, the person's column, their record type)}
+LINKS = {"guardians": ("guardianships", "patient_id", "guardian_id", "Legal Guardian"),
+         "people": ("incident_people", "incident_id", "patient_id", "Patient")}
+
+
+def set_links(db, field, row_id, uids):
+    """Link a record to exactly these people (record IDs). Returns their names before and after."""
+    table, own, other, record_type = LINKS[field]
     names = lambda: ", ".join(r[0] for r in db.execute(
-        "SELECT g.name FROM guardianships gs JOIN patients g ON g.id = gs.guardian_id WHERE gs.patient_id = ? ORDER BY g.name",
-        (patient_id,)))
+        f"SELECT p.name FROM {table} l JOIN patients p ON p.id = l.{other} WHERE l.{own} = ? ORDER BY p.name", (row_id,)))
     before, ids = names(), []
     for uid in dict.fromkeys(uids):
         row = db.execute("SELECT id, record_type FROM patients WHERE uid = ?", (uid,)).fetchone()
-        if not row or row["record_type"] != "Legal Guardian":
-            raise ValueError("Choose legal guardians from the list")
+        if not row or row["record_type"] != record_type:
+            raise ValueError(f"Choose {'legal guardians' if field == 'guardians' else 'patients'} from the list")
         ids.append(row["id"])
-    db.execute("DELETE FROM guardianships WHERE patient_id = ?", (patient_id,))
-    db.executemany("INSERT INTO guardianships (patient_id, guardian_id) VALUES (?, ?)", [(patient_id, i) for i in ids])
+    db.execute(f"DELETE FROM {table} WHERE {own} = ?", (row_id,))
+    db.executemany(f"INSERT INTO {table} ({own}, {other}) VALUES (?, ?)", [(row_id, i) for i in ids])
     return before, names()
 
 
@@ -964,15 +1016,18 @@ def create_record(name, fields, parent_uid=None):
         with connect() as db:
             person_values(db, values)
         values["created"] = now()
-    guardians = values.pop("guardians", None)
+    links = {field: values.pop(field) for field in LINKS if field in values}
     if name == "cottages":
         values["name"] = " ".join(values["name"].split())
         check_cottage_name(values["name"])
+    if name in ("cottages", "incidents"):
         values["created"] = now()
     if name == "measures":
         check_measure(values, fields)
     if name == "medications" and values.get("name"):  # "zoloft" -> "Sertraline", so a medication is listed one way
         values["name"] = fieldtypes.canonical_medication(values["name"])
+    if name == "medications" and values.get("frequency"):  # "BID" -> "Twice a day"
+        values["frequency"] = fieldtypes.standard_frequency(values["frequency"])
     if name == "medications" and fields.get("source"):  # where a medication suggested from the records was found
         values["source"] = str(fields["source"])[:300]
     type_field = fieldtypes.RECORD_TYPE_FIELD.get(name)
@@ -987,13 +1042,18 @@ def create_record(name, fields, parent_uid=None):
             values["patient_id"] = internal_id(db, "patients", parent_uid)
         row_id, uid = insert(db, name, values)
         patient_id = row_id if name == "patients" else values.get("patient_id")
-        if guardians:
-            set_guardians(db, row_id, guardians)
+        for field, uids in links.items():
+            set_links(db, field, row_id, uids)
+        involved = [r[0] for r in db.execute("SELECT patient_id FROM incident_people WHERE incident_id = ?", (row_id,))] \
+            if name == "incidents" else []
         if name == "cottages":
             sync_cottage_options(db)
     title = values.get(OBJECTS[name]["title_field"]) or ""
     label = person_label(values["record_type"]) if name == "patients" else OBJECTS[name]["label"].lower()
-    log(f"created {label}", patient_id, uid if name == "patients" else f"{uid}: {title}")
+    for person in involved:  # an incident goes in the activity of everyone involved
+        log("recorded incident", person, f"{uid}: {title}")
+    if not involved:
+        log(f"created {label}", patient_id, uid if name == "patients" else f"{uid}: {title}")
     return uid
 
 
@@ -1027,6 +1087,8 @@ def update_record(name, uid, fields):
     values = clean_fields(name, fields)
     if name == "medications" and values.get("name"):
         values["name"] = fieldtypes.canonical_medication(values["name"])
+    if name == "medications" and values.get("frequency"):
+        values["frequency"] = fieldtypes.standard_frequency(values["frequency"])
     if name == "cottages" and values.get("name"):
         values["name"] = " ".join(values["name"].split())
         check_cottage_name(values["name"], uid)
@@ -1036,7 +1098,7 @@ def update_record(name, uid, fields):
         current = dict(db.execute(f"SELECT * FROM {name} WHERE id = ?", (row_id,)).fetchone())
         if name == "patients":
             person_values(db, values, current)
-    guardians, guardian_change = values.pop("guardians", None), None
+    links, link_changes = {field: values.pop(field) for field in LINKS if field in values}, {}
     if name in fieldtypes.RECORD_TYPE_FIELD:
         record_type = values.get(fieldtypes.RECORD_TYPE_FIELD[name]) or current[fieldtypes.RECORD_TYPE_FIELD[name]]
         incoming = {**{k: v for k, v in fields.items() if k not in values and k != "custom"}, **(fields.get("custom") or {})}
@@ -1053,10 +1115,11 @@ def update_record(name, uid, fields):
             values["custom"] = json.dumps(stored)
     with connect() as db:
         values = {k: v for k, v in values.items() if (current.get(k) if current.get(k) is not None else "") != v}
-        if guardians is not None:
-            before, after = set_guardians(db, row_id, guardians)
-            guardian_change = (before, after) if before != after else None
-        if not values and not guardian_change:
+        for field, uids in links.items():
+            before, after = set_links(db, field, row_id, uids)
+            if before != after:
+                link_changes[field] = (before, after)
+        if not values and not link_changes:
             return
         if name == "facts":
             values["edited"] = now()
@@ -1079,7 +1142,7 @@ def update_record(name, uid, fields):
     changed = "; ".join([f"{labels[k]}: {short(current.get(k))} → {short(v)}" for k, v in values.items()
                          if k not in ("edited", "custom")] +
                         [f"{labels[k]}: {short(old)} → {short(new)}" for k, (old, new) in custom_changes.items()] +
-                        ([f"legal guardians: {short(guardian_change[0])} → {short(guardian_change[1])}"] if guardian_change else []))
+                        [f"{labels[k]}: {short(old)} → {short(new)}" for k, (old, new) in link_changes.items()])
     label = person_label(values.get("record_type") or current["record_type"]) if name == "patients" else OBJECTS[name]["label"].lower()
     log(f"edited {label}", patient_id, f"{uid}: {changed}")
 
@@ -1141,7 +1204,24 @@ def cottage_inputs(uid, facts_each=12, notes_each=2):
                 numbers.append(len(facts))
             residents.append({"name": r["name"], "id": r["id"], "age": age, "gender": r["gender"] or "", "admitted": r["admitted"] or "",
                               "medications": meds, "scores": scores, "facts": numbers})
+    facts += incident_facts([r["id"] for r in record["related"]["residents"]])
     return {"cottage": record["record"]["name"], "residents": residents, "facts": facts}
+
+
+def incident_facts(patient_uids, involving_several=1, limit=20):
+    """Incidents involving these patients as facts the cottage briefings can cite, newest first. involving_several:
+    how many of these patients an incident must involve (2 for incidents between residents of different cottages)."""
+    found = {}
+    for uid in patient_uids:
+        for i in patient_incidents(uid):
+            found.setdefault(i["id"], {**i, "count": 0})["count"] += 1
+    later = lambda text: fieldtypes.date_key(text) or (0, 0, 0)
+    chosen = sorted((i for i in found.values() if i["count"] >= involving_several), key=lambda i: later(i["date"]), reverse=True)[:limit]
+    return [{"resident": f"Incident{' ' + i['date'] if i['date'] else ''}", "resident_id": i["id"], "document": "Incident report",
+             "date": i["date"] or "",
+             "fact": " ".join(x for x in (f"Incident ({', '.join(y for y in (i['type'], i['severity']) if y)}):" if i["type"] or i["severity"] else "Incident:",
+                                          f"{i['title']}.", i["description"] or "", f"Injuries: {i['injuries']}." if i["injuries"] else "",
+                                          f"Involved: {i['people']}." if i["people"] else "") if x)[:900]} for i in chosen]
 
 
 def intercottage_inputs(facts_each=8):
@@ -1174,7 +1254,19 @@ def intercottage_inputs(facts_each=8):
                                           "WHERE p.uid = ? AND d.kind = 'Note'", (r["id"],))]
             for text, document, date in [x for x in texts if mentions.search(x[0])][:facts_each]:
                 facts.append({"resident": r["name"], "resident_id": r["id"], "fact": text[:600], "document": document, "date": date or ""})
+    # Incidents involving residents of two or more different cottages
+    cottage_of = {r["id"]: c for c, r in everyone}
+    for f in incident_facts(list(cottage_of)):
+        involved = {cottage_of[uid] for uid in cottage_of if uid in [x["id"] for x in incident_people(f["resident_id"])]}
+        if len(involved) > 1:
+            facts.append(f)
     return {"cottages": cottages, "facts": facts}
+
+
+def incident_people(incident_uid):
+    with connect() as db:
+        return [{"id": r[0], "name": r[1]} for r in db.execute(
+            "SELECT patient_id, patient FROM incident_people_view WHERE incident_id = ? ORDER BY patient", (incident_uid,))]
 
 
 def save_cottage_analysis(uid, result, model):
@@ -1501,6 +1593,9 @@ def timeline(patient_uid):
             add(m["date"], "measure", f"{m['measure']}{score}{' (' + band + ')' if band else ''}", m["uid"])
         for f in db.execute("SELECT * FROM follow_ups WHERE patient_id = ?", (patient["id"],)):
             add(f["due"], "follow_up", f"{'Done' if f['status'] == 'Done' else 'Due'}: {f['title']}", f["uid"])
+    for i in patient_incidents(patient_uid):
+        others = ", ".join(n for n in (i["people"] or "").split(", ") if n and n != patient["name"])
+        add(i["date"], "incident", f"Incident: {i['title']}{' (with ' + others + ')' if others else ''}", i["id"])
     seen, unique = set(), []
     for e in sorted(events, key=lambda e: e["key"]):
         signature = (e["key"], e["text"].lower().strip(" ."))  # the same fact read from two documents
@@ -1764,3 +1859,15 @@ def upgrade_to_v7(db):
 
 
 MIGRATIONS[7] = upgrade_to_v7
+
+
+def upgrade_to_v8(db):
+    """Version 8: incidents (their tables are created after this), and how often a medication is taken written the
+    standard way ("BID" and "twice daily" become "Twice a day"); anything else stays as written."""
+    if {r[1] for r in db.execute("PRAGMA table_info(medications)")}:
+        for r in db.execute("SELECT id, frequency FROM medications WHERE COALESCE(frequency, '') != ''").fetchall():
+            if fieldtypes.standard_frequency(r["frequency"]) != r["frequency"]:
+                db.execute("UPDATE medications SET frequency = ? WHERE id = ?", (fieldtypes.standard_frequency(r["frequency"]), r["id"]))
+
+
+MIGRATIONS[8] = upgrade_to_v8

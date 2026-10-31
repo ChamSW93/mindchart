@@ -24,11 +24,13 @@ ITEMS = {"add_medication": ("medications", ["name", "dose", "frequency", "start_
          "add_measure": ("measures", ["measure", "score", "date"]),
          "add_follow_up": ("follow_ups", ["title", "due", "category"])}
 ITEM_FIELDS = list(dict.fromkeys(f for _, names in ITEMS.values() for f in names))
+# An incident logged from the command bar: what the model fills in, plus every youth it names in "people"
+INCIDENT_FIELDS = ["title", "date", "time", "type", "severity", "location", "description", "injuries", "response"]
 
 SCHEMA = {
     "type": "object",
     "properties": {
-        "intent": {"type": "string", "enum": ["question", "new_patient", "add_note", "update_patient", *ITEMS, "unclear"]},
+        "intent": {"type": "string", "enum": ["question", "new_patient", "add_note", "update_patient", *ITEMS, "add_incident", "unclear"]},
         "sql": {"type": "string", "maxLength": 1500},
         "explanation": {"type": "string", "maxLength": 400},
         "patient": {"type": "string", "maxLength": 120},
@@ -41,8 +43,11 @@ SCHEMA = {
         "note_date": {"type": "string", "maxLength": 30},
         "item": {"type": "object", "properties": {name: {"type": "string", "maxLength": 300} for name in ITEM_FIELDS},
                  "required": ITEM_FIELDS},
+        "incident": {"type": "object", "properties": {name: {"type": "string", "maxLength": 2000} for name in INCIDENT_FIELDS},
+                     "required": INCIDENT_FIELDS},
+        "people": {"type": "array", "items": {"type": "string", "maxLength": 120}},
     },
-    "required": ["intent", "sql", "explanation", "patient", "patient_fields", "note_text", "note_date", "item"],
+    "required": ["intent", "sql", "explanation", "patient", "patient_fields", "note_text", "note_date", "item", "incident", "people"],
 }
 
 PROMPT = """You are the assistant inside {app}, a private, offline app a psychiatric nurse practitioner uses to keep
@@ -55,8 +60,15 @@ Decide what the person wants:
 - "new_patient": they want to add a patient. Fill "patient_fields" with what they gave ("name", their full name, is
   required), including "placement" and that placement's own fields (for example "Collins cottage" means placement
   "Residential treatment" and cottage "Collins"). Placements: {placements}. "gender" is Male, Female or X.
-- "add_note": they're giving information about a patient to record (an observation, event, medication change,
-  phone call, incident). Put the patient's ID or name in "patient". Write "note_text" as a clear clinical note in
+- "add_incident": an event involving one or more youths: a fight or altercation, an injury, self-harm, running away
+  (AWOL), a restraint, property damage, substance use. Put EVERY youth named in "people" (their names as written,
+  including anyone not on the list below). Fill "incident": title (a short summary such as "Altercation between Eric
+  and Janno"), date (MM/DD/YYYY; "today" is {today}; "" if no day is said), time (only a clock time that's said, such
+  as 3:15 pm; otherwise ""), type (one of: {incident_types}), severity
+  (Minor, Moderate or Serious, only if it's clear), location, description (a clear third-person account keeping every
+  detail given and adding nothing), injuries (who was hurt and how, as said), response (what staff did, as said).
+- "add_note": they're giving information about one patient to record (an observation, medication change, phone
+  call) that isn't an incident. Put the patient's ID or name in "patient". Write "note_text" as a clear clinical note in
   the third person keeping every detail they gave and adding nothing. "note_date" is the date they mention, else "".
 - "update_patient": they want to change a patient's details (status, placement, admission date, etc.).
   Put the patient in "patient" and only the changed values in "patient_fields".
@@ -90,6 +102,8 @@ Examples (with PT-XXXXXX standing for the patient's real record ID from the list
 - "Who has an order of protection?" -> SELECT DISTINCT patient, patient_id, fact FROM facts_view WHERE fact LIKE '%order of protection%' LIMIT 200
 - "How many active patients are there?" -> SELECT COUNT(*) AS active_patients FROM patients_view WHERE status = 'Active'
 - "Which patients are in foster care?" -> SELECT id, name, guardian FROM patients_view WHERE placement = 'Foster care' LIMIT 200
+- "What incidents has Sam been in?" -> SELECT i.date, i.title, i.type, i.people FROM incidents_view i
+  JOIN incident_people_view l ON l.incident_id = i.id WHERE l.patient_id = 'PT-XXXXXX' LIMIT 200
 - "Who lives in Collins?" -> SELECT id, name FROM patients_view WHERE json_extract(details, '$.cottage') = 'Collins' AND status != 'Discharged' LIMIT 200
 - "Who are Sam's legal guardians, and their phone numbers?" -> SELECT g.name, json_extract(g.details, '$.relationship') AS relationship,
   json_extract(g.details, '$.phone') AS phone FROM guardians_view g JOIN guardianships_view l ON l.guardian_id = g.id WHERE l.patient_id = 'PT-XXXXXX'
@@ -117,7 +131,7 @@ def view_columns():
     with vault.connect(read_only=True) as db:
         return {
             name: [row[1] for row in db.execute(f"PRAGMA table_info({name}_view)")]
-            for name in [*vault.OBJECTS, "guardians", "guardianships"]
+            for name in [*vault.OBJECTS, "guardians", "guardianships", "incident_people"]
         }
 
 
@@ -131,7 +145,8 @@ def build_prompt(app_name):
         for obj, types in vault.field_definitions().items() for rt, defs in types.items())
     return PROMPT.format(app=app_name, today=datetime.date.today().strftime("%m/%d/%Y"), views=views,
                          sections=", ".join(vault.SECTIONS), patients=patients, record_types=record_types,
-                         measures=", ".join(vault.record_type_names("measures")), placements=", ".join(fieldtypes.PLACEMENTS))
+                         measures=", ".join(vault.record_type_names("measures")), placements=", ".join(fieldtypes.PLACEMENTS),
+                         incident_types=", ".join(fieldtypes.INCIDENT_TYPES))
 
 
 def find_patient(reference):
@@ -140,16 +155,80 @@ def find_patient(reference):
     if not reference:
         return []
     with vault.connect(read_only=True) as db:
-        exact = db.execute("SELECT uid AS id, name, dob FROM patients WHERE uid = ? COLLATE NOCASE", (reference,)).fetchall()
+        exact = db.execute("SELECT uid AS id, name, dob FROM patients WHERE uid = ? COLLATE NOCASE AND record_type = 'Patient'",
+                           (reference,)).fetchall()
         if exact:
             return [dict(r) for r in exact]
-        return [dict(r) for r in db.execute("SELECT uid AS id, name, dob FROM patients WHERE name LIKE ? ORDER BY name",
-                                            (f"%{reference}%",))]
+        return [dict(r) for r in db.execute("SELECT uid AS id, name, dob FROM patients WHERE name LIKE ? AND record_type = 'Patient' "
+                                            "ORDER BY name", (f"%{reference}%",))]
+
+
+def find_people(name):
+    """Patients whose names contain every word of the name given, as whole words ("Eric" is not "Erica")."""
+    words = [w.lower() for w in re.findall(r"[\w'-]+", name)]
+    if not words:
+        return []
+    with vault.connect(read_only=True) as db:
+        rows = [dict(r) for r in db.execute("SELECT uid AS id, name, dob FROM patients WHERE record_type = 'Patient' ORDER BY name")]
+    return [r for r in rows if all(w in [x.lower() for x in re.findall(r"[\w'-]+", r["name"])] for w in words)]
+
+
+def said_details(incident, message):
+    """Keep only the date, time and severity the person actually gave: models fill these in when they weren't said."""
+    words, today = message.lower(), datetime.date.today()
+    if re.search(r"\b(yesterday|last night)\b", words):
+        incident["date"] = (today - datetime.timedelta(days=1)).strftime("%m/%d/%Y")
+    elif re.search(r"\b(today|this (morning|afternoon|evening)|tonight)\b", words):
+        incident["date"] = today.strftime("%m/%d/%Y")
+    elif not re.search(r"\d{1,2}/\d{1,2}|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d|\b(mon|tues|wednes|thurs|fri|satur|sun)day\b", words):
+        incident.pop("date", None)
+    if not re.search(r"\b\d{1,2}(:\d{2})?\s*(am|pm|a\.m\.|p\.m\.)|\b\d{1,2}:\d{2}\b|\bnoon\b|\bmidnight\b", words):
+        incident.pop("time", None)
+    said = re.search(r"\b(minor|mild|moderate|serious|severe|major)\b", words)
+    if said:  # severity as the person put it
+        incident["severity"] = {"minor": "Minor", "mild": "Minor", "moderate": "Moderate"}.get(said.group(1), "Serious")
+    else:
+        incident.pop("severity", None)
+    return incident
+
+
+def incident_proposal(reply, explanation, message=""):
+    """An incident to check before saving, with every youth named: matched to their record, offered as a new patient
+    if they aren't on file, or listed for the person to choose when the name fits more than one patient."""
+    incident = {k: str(v).strip() for k, v in (reply.get("incident") or {}).items() if k in INCIDENT_FIELDS and str(v).strip()}
+    incident = said_details(incident, message)
+    if not incident.get("title") and not incident.get("description"):
+        return {"kind": "message", "text": "What happened? Describe the incident and who was involved."}
+    incident.setdefault("title", incident.get("description", "")[:80])
+    if incident.get("type") and incident["type"] not in fieldtypes.INCIDENT_TYPES:
+        incident["type"] = next((t for t in fieldtypes.INCIDENT_TYPES if t.lower().startswith(incident["type"].lower()[:6])), "Other")
+    if incident.get("severity") not in ("Minor", "Moderate", "Serious"):
+        incident.pop("severity", None)
+    people, unsure = [], []
+    for name in dict.fromkeys(" ".join(str(n).split()) for n in reply.get("people") or [] if str(n).strip()):
+        matches = find_people(name)
+        if len(matches) == 1:
+            people.append({"id": matches[0]["id"], "name": matches[0]["name"]})
+        elif not matches:
+            first, last = fieldtypes.split_name(name)
+            people.append({"id": f"new:{first}|{last}", "name": f"{name} (new patient)"})
+        else:
+            unsure.append({"name": name, "matches": matches})
+    if not people and not unsure:
+        return {"kind": "message", "text": "Who was involved? Name the youths in the incident."}
+    names = lambda items: " and ".join([", ".join(items[:-1]), items[-1]] if len(items) > 1 else items)
+    new = [p["name"].replace(" (new patient)", "") for p in people if p["id"].startswith("new:")]
+    summary = f"An incident involving {names([p['name'].replace(' (new patient)', '') for p in people] + [u['name'] for u in unsure])}."
+    if new:
+        summary += f" Saving also adds {names(new)} as {'a new patient' if len(new) == 1 else 'new patients'}."
+    return {"kind": "proposal", "action": "add_incident", "object": "incidents", "summary": summary,
+            "fields": {**incident, "people": people}, "unsure": unsure}
 
 
 def empty_reply():
     return {"intent": "unclear", "sql": "", "explanation": "", "patient": "", "note_text": "", "note_date": "",
-            "patient_fields": {name: "" for name in PATIENT_FIELDS}, "item": {name: "" for name in ITEM_FIELDS}}
+            "patient_fields": {name: "" for name in PATIENT_FIELDS}, "item": {name: "" for name in ITEM_FIELDS},
+            "incident": {name: "" for name in INCIDENT_FIELDS}, "people": []}
 
 
 def ask_assistant(model, thinking, system, message):
@@ -171,7 +250,7 @@ def handle(message, model, thinking, app_name):
     system = build_prompt(app_name)
     reply = {**empty_reply(), **ask_assistant(model, thinking, system, message)}
     intent, explanation = reply["intent"], reply["explanation"]
-    if intent not in ("new_patient", "add_note", "update_patient", *ITEMS) and reply["sql"].strip().lower().startswith(("select", "with")):
+    if intent not in ("new_patient", "add_note", "update_patient", *ITEMS, "add_incident") and reply["sql"].strip().lower().startswith(("select", "with")):
         intent = "question"  # models sometimes label a plain question "unclear" while still writing the right query
 
     if intent == "question":
@@ -195,6 +274,8 @@ def handle(message, model, thinking, app_name):
         vault.log("asked a question", None, message[:200])
         return {"kind": "answer", "explanation": explanation, "sql": reply["sql"], **result}
 
+    if intent == "add_incident":
+        return incident_proposal(reply, explanation, message)
     fields = {k: v.strip() for k, v in reply["patient_fields"].items() if v and v.strip()}
     if intent == "new_patient":
         if not fields.get("name"):
@@ -248,6 +329,9 @@ def item_proposal(intent, reply, explanation, patient):
 def confirm(proposal):
     """Save a proposal the person has reviewed (and possibly edited)."""
     action, fields = proposal["action"], proposal["fields"]
+    if action == "add_incident":  # new patients were made by the page first, so these are all record IDs
+        uid = vault.create_record("incidents", fields)
+        return {"kind": "done", "object": "incidents", "id": uid, "text": f"Recorded the incident ({uid})."}
     if action == "new_patient":
         uid = vault.create_record("patients", fields)
         name = fieldtypes.full_name(fields.get("first_name"), fields.get("last_name")) or fields.get("name")

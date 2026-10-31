@@ -476,6 +476,42 @@ class Cottages(unittest.TestCase):
         self.assertIn("Marlow", found[0])
 
 
+class Incidents(unittest.TestCase):
+    """Incidents, linked to every youth involved."""
+    @classmethod
+    def setUpClass(cls):
+        cls.vault = support.unlocked_vault()
+
+    def test_an_incident_links_everyone_involved(self):
+        a = self.vault.create_record("patients", {"name": "Inc Ana (fictional)", "placement": "Residential treatment", "cottage": "Howard"})
+        b = self.vault.create_record("patients", {"name": "Inc Bo (fictional)", "placement": "Residential treatment", "cottage": "Howard"})
+        uid = self.vault.create_record("incidents", {"title": "Shoving in the hallway", "date": "10292026",
+                                                     "type": "Physical aggression", "injuries": "Bo: scraped elbow.", "people": [a, b]})
+        self.assertTrue(uid.startswith("INC-"))
+        self.assertTrue(self.vault.get_record("incidents", uid)["record"]["created"])
+        self.assertEqual(self.vault.get_record("incidents", uid)["record"]["date"], "10/29/2026")
+        for person in (a, b):
+            self.assertEqual(self.vault.get_record("patients", person)["related"]["incidents"][0]["id"], uid)
+            self.assertIn("recorded incident", [r["action"] for r in self.vault.list_records("activity", patient_uid=person)["rows"]])
+        events = [e["text"] for e in self.vault.timeline(a)]
+        self.assertIn("Incident: Shoving in the hallway (with Inc Bo (fictional))", events)
+        howard = next(r["id"] for r in self.vault.list_records("cottages")["rows"] if r["name"] == "Howard")
+        self.assertTrue(any("Shoving in the hallway" in f["fact"] for f in self.vault.cottage_inputs(howard)["facts"]))
+        self.vault.update_record("incidents", uid, {"people": [a]})
+        self.assertEqual(self.vault.get_record("patients", b)["related"]["incidents"], [])
+        with self.assertRaisesRegex(ValueError, "patients from the list"):
+            self.vault.update_record("incidents", uid, {"people": [a, "LG-NOTREAL"]})
+        self.vault.delete_record("incidents", uid)
+        self.assertEqual(self.vault.get_record("patients", a)["related"]["incidents"], [])
+
+    def test_how_often_is_written_the_standard_way(self):
+        patient = self.vault.create_record("patients", {"name": "Freq Test (fictional)"})
+        med = self.vault.create_record("medications", {"name": "Sertraline", "frequency": "BID"}, patient)
+        self.assertEqual(self.vault.get_record("medications", med)["record"]["frequency"], "Twice a day")
+        self.vault.update_record("medications", med, {"frequency": "with breakfast"})
+        self.assertEqual(self.vault.get_record("medications", med)["record"]["frequency"], "with breakfast")
+
+
 class Upgrades(unittest.TestCase):
     """Upgrading saved data, on a plain database file (the steps don't depend on encryption)."""
 

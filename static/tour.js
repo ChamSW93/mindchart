@@ -51,6 +51,15 @@ const HELP = {
     ["Cottage dynamics (experimental)", "The AI reads the residents' records (risk, social, trauma and substance use facts, recent notes, medications and scores) and writes a short briefing: shared themes, what's recorded between residents, and what to watch for. Every point links to the records it comes from. It's not a clinical assessment."],
     ["Feedback", "Mark an analysis Helpful or Not helpful and say what was right, wrong or missing. MindChart passes your recent comments to the AI next time."],
   ] },
+  "list:incidents": { title: "Incidents", intro: "Fights, injuries, running away, restraints and other events, with everyone involved.", items: [
+    ["+ New incident", "Record what happened, when and where, the injuries and staff response, and add each youth involved. Someone not on file can be added as a new patient right there."],
+    ["From the bar at the top", "Describe it in your own words (\u201cEric had mild wounds from the incident with Janno\u201d). MindChart names everyone involved, matches them to their records, offers a new record for anyone not on file, and shows it all to check before saving."],
+    ["Where incidents show", "On each youth's page and timeline, and in the cottage briefings, where they count as what's recorded between residents."],
+  ] },
+  "record:incidents": { title: "An incident", intro: "One event and the youths involved.", items: [
+    ["Youths involved", "Each links to their page. Click Edit to add or remove someone."],
+    ["Edit and Delete", "Every change is logged. Deleting removes the incident from everyone's pages."],
+  ] },
   "record:guardians": { title: "A guardian's page", intro: "One legal guardian and the patients they're responsible for.", items: [
     ["Edit", "Change their name, relationship or contact details. A new name shows on their patients' pages too."],
     ["Guardian of", "The patients linked to them. To link another, open that patient, click Edit, and choose this guardian under Legal guardian."],

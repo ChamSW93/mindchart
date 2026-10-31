@@ -38,6 +38,8 @@ PLACEMENTS = list(PLACEMENT_FIELDS)
 COTTAGES = sorted(["Rose", "Collins", "Smith", "Crest", "Fanshaw", "Kendall", "Howard", "Van Horn", "Dwight", "Williams",
                    "Butler", "Minturn", "JRIC", "NEST", "AOBH"], key=str.lower)
 GENDERS = ["Male", "Female", "X"]
+INCIDENT_TYPES = ["Physical aggression", "Verbal aggression or threats", "Injury", "Self-harm", "AWOL / elopement",
+                  "Restraint or hold", "Property damage", "Substance use", "Sexual behavior", "Bullying", "Medical", "Other"]
 
 DEFAULT_RECORD_TYPES = {
     "patients": {
@@ -391,3 +393,31 @@ def canonical_medication(name):
         if typed.lower() == entry["name"].lower() or bare == entry["name"].lower() or typed.lower() in (b.lower() for b in entry["brands"]):
             return entry["name"]
     return typed
+
+
+# How often a medication is taken: the standard choices, and the ways people (and records) write them
+FREQUENCIES = ["Daily", "Every morning", "At bedtime", "Twice a day", "Three times a day", "Four times a day", "Hourly",
+               "Every 4 hours", "Every 6 hours", "Every 8 hours", "Every 12 hours", "Every other day", "Weekly",
+               "Every 2 weeks", "Monthly", "Every 3 months", "As needed (PRN)", "Once"]
+FREQUENCY_WORDS = {
+    "Daily": ["daily", "once daily", "once a day", "every day", "qd", "q.d.", "1x daily", "once per day"],
+    "Every morning": ["every morning", "in the morning", "qam", "q.a.m.", "each morning", "daily in the morning"],
+    "At bedtime": ["at bedtime", "bedtime", "nightly", "qhs", "q.h.s.", "hs", "at night", "every night", "every evening"],
+    "Twice a day": ["twice a day", "twice daily", "bid", "b.i.d.", "2x daily", "two times a day", "two times daily"],
+    "Three times a day": ["three times a day", "three times daily", "tid", "t.i.d.", "3x daily"],
+    "Four times a day": ["four times a day", "four times daily", "qid", "q.i.d.", "4x daily"],
+    "Hourly": ["hourly", "every hour", "q1h"], "Every 4 hours": ["every 4 hours", "q4h"], "Every 6 hours": ["every 6 hours", "q6h"],
+    "Every 8 hours": ["every 8 hours", "q8h"], "Every 12 hours": ["every 12 hours", "q12h"],
+    "Every other day": ["every other day", "qod", "alternate days"], "Weekly": ["weekly", "once a week", "every week", "once weekly"],
+    "Every 2 weeks": ["every 2 weeks", "every two weeks", "biweekly"], "Monthly": ["monthly", "once a month", "every month"],
+    "Every 3 months": ["every 3 months", "every three months", "quarterly"],
+    "As needed (PRN)": ["as needed", "as needed (prn)", "prn", "p.r.n.", "when needed"], "Once": ["once", "one time", "single dose"],
+}
+
+
+def standard_frequency(text):
+    """How often, in the standard wording when it's one of the usual ways to write it ("BID" -> "Twice a day").
+    Anything else (such as "with breakfast") is kept as written."""
+    typed = " ".join(str(text or "").split())
+    words = typed.lower().rstrip(".")
+    return next((standard for standard, ways in FREQUENCY_WORDS.items() if words in ways or words == standard.lower()), typed)

@@ -3,9 +3,9 @@
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = { session: null, objects: null, sectionTitles: {}, models: [], dirtyDraft: false, work: {}, uploads: null };
-const ICONS = { patients: "i-patients", guardians: "i-guardian", cottages: "i-cottage", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity",
+const ICONS = { patients: "i-patients", guardians: "i-guardian", cottages: "i-cottage", incidents: "i-incident", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity",
   medications: "i-meds", measures: "i-measures", follow_ups: "i-follow" };
-const PREFIXES = { PT: "patients", LG: "patients", CTG: "cottages", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity", MED: "medications",
+const PREFIXES = { PT: "patients", LG: "patients", CTG: "cottages", INC: "incidents", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity", MED: "medications",
   MSR: "measures", FUP: "follow_ups" };
 const HIDDEN_COLUMNS = ["patient_id", "document_id", "notes", "quote", "read_by_model", "seq", "details", "read_state",
   "first_name", "last_name", "record_type", "guardian_id"];
@@ -239,7 +239,7 @@ function renderNav() {
   const here = location.hash || "#/";
   const items = [["#/", "Home", "i-home"], ["#/uploads", "Uploads", "i-upload"], ["#/list/patients", "Patients", ICONS.patients],
     ["#/list/guardians", "Guardians", ICONS.guardians],
-    ...["cottages", "follow_ups", "medications", "documents", "facts", "drafts", "activity"]
+    ...["cottages", "incidents", "follow_ups", "medications", "documents", "facts", "drafts", "activity"]
     .map((o) => [`#/list/${o}`, state.objects[o].plural, ICONS[o]]), ["#/settings", "Settings", "i-settings"]];
   // People's pages are all under #/r/patients/: PT-... for patients, LG-... for guardians
   const pages = { patients: "#/r/patients/PT-", guardians: "#/r/patients/LG-" };
@@ -373,20 +373,27 @@ function placementShows(def, placement, value) {
   return !anywhere || (lists[placement] || []).includes(def.name) || (value !== undefined && value !== null && value !== "");
 }
 
-async function loadGuardians() {
-  state.guardians = (await api("GET", "records/patients?type=Legal%20Guardian")).rows;
+// The people a picker offers: guardians (for a patient's Legal guardians) and patients (for an incident's youths)
+async function loadPeople() {
+  const [guardians, patients] = await Promise.all([api("GET", "records/patients?type=Legal%20Guardian"), api("GET", "records/patients")]);
+  state.guardians = guardians.rows;
+  state.patientChoices = patients.rows;
 }
+const loadGuardians = loadPeople;
 
-// Guardians added with "New guardian…" are saved as records when the form is, then linked like the others.
-async function withNewGuardians(values) {
-  if (!Array.isArray(values.guardians)) return values;
-  values.guardians = await Promise.all(values.guardians.filter(Boolean).map(async (value) => {
-    if (!value.startsWith("new:")) return value;
-    const [first, last] = value.slice(4).split("|");
-    return (await api("POST", "records/patients", { record_type: "Legal Guardian", first_name: first, last_name: last })).id;
-  }));
+// People added with "New guardian…" or "New patient…" are saved as records when the form is, then linked like the others.
+async function withNewPeople(values) {
+  for (const [field, recordType] of [["guardians", "Legal Guardian"], ["people", "Patient"]]) {
+    if (!Array.isArray(values[field])) continue;
+    values[field] = await Promise.all(values[field].filter(Boolean).map(async (value) => {
+      if (!value.startsWith("new:")) return value;
+      const [first, last] = value.slice(4).split("|");
+      return (await api("POST", "records/patients", { record_type: recordType, first_name: first, last_name: last })).id;
+    }));
+  }
   return values;
 }
+const withNewGuardians = withNewPeople;
 
 const guardianChip = (name, id, label) => `<label class="person-chip" title="Untick to remove">
   <input type="checkbox" ${name} value="${esc(id)}" data-multi checked> ${esc(label)}</label>`;
@@ -448,7 +455,8 @@ async function listView(object, search = "", recordType = "") {
     return guardians ? rows.map((r) => ({ ...r, ...JSON.parse(r.details || "{}"),  // relationship and phone as columns
       drive: r.drive_minutes ? `about ${minutesText(r.drive_minutes)}` : null })) : rows;
   };
-  const columns = object === "cottages" ? ["id", "name", "residents", "lead", "capacity"] : object !== "patients" ? undefined
+  const columns = object === "cottages" ? ["id", "name", "residents", "lead", "capacity"]
+    : object === "incidents" ? ["id", "date", "title", "type", "severity", "people", "location"] : object !== "patients" ? undefined
     : guardians ? ["id", "name", "relationship", "phone", "town", "drive", "guardian_of"]
     : ["id", "name", "placement", "dob", "gender", "status", "guardian", "documents"];
   const byMedication = object === "medications" && state.medicationView !== "all";
@@ -462,6 +470,7 @@ async function listView(object, search = "", recordType = "") {
       ${object === "patients" ? `<button id="newPatient">+ New ${guardians ? "guardian" : "patient"}</button>` : ""}
       ${object === "documents" ? '<button id="listUpload">Upload documents</button>' : ""}
       ${object === "cottages" ? '<button id="newCottage">+ New cottage</button>' : ""}
+      ${object === "incidents" ? '<button id="newIncident">+ New incident</button>' : ""}
       ${object === "medications" ? `<div class="segmented"><button class="${byMedication ? "on" : ""}" data-view="names">By medication</button>
         <button class="${byMedication ? "" : "on"}" data-view="all">Every entry</button></div>` : ""}</div>
     <div id="newPatientForm"></div>
@@ -478,6 +487,7 @@ async function listView(object, search = "", recordType = "") {
   };
   if (object === "patients") $("#newPatient").onclick = () => newPatientForm($("#newPatientForm"), guardians ? "Legal Guardian" : "Patient");
   if (object === "documents") $("#listUpload").onclick = () => pickFiles();
+  if (object === "incidents") $("#newIncident").onclick = () => newIncidentForm($("#newPatientForm"));
   if (object === "cottages") {
     $("#newCottage").onclick = () => newCottageForm($("#newPatientForm"));
     analysisCard($("#crossBox"), { title: "Dynamics across cottages", intro: "How the cottages compare, and what the records say about residents of different cottages together.",
@@ -510,6 +520,13 @@ const placeText = (p) => `${p.town}, ${p.state}${p.minutes ? ` · about ${minute
 // --- Suggestions under a text box (medications, ZIP codes): type to narrow them, arrows and Return to choose ----------
 
 const SUGGESTERS = {
+  async choices(text, input) {  // a field's standard choices, narrowed by what's typed
+    const [object, name] = input.dataset.field.split(".");
+    const t = text.toLowerCase();
+    const options = fieldSpec(object, name)?.suggest || [];
+    const found = t ? options.filter((o) => o.toLowerCase().includes(t)) : options;
+    return found.map((o) => ({ value: o, label: o }));
+  },
   async medications(text) {
     state.medicationNames = state.medicationNames || (await api("GET", "medication-names")).medications;
     const t = text.toLowerCase();
@@ -547,7 +564,7 @@ function attachSuggest(input) {
     input.dispatchEvent(new Event("change", { bubbles: true }));
   };
   const show = async () => {
-    items = await find(input.value.trim());
+    items = await find(input.value.trim(), input);
     active = items.length ? 0 : -1;
     list.innerHTML = items.map((it, i) => `<button type="button" tabindex="-1" data-i="${i}"><b>${esc(it.label)}</b>${it.detail ? `<small>${esc(it.detail)}</small>` : ""}</button>`).join("");
     mark();
@@ -622,7 +639,7 @@ function displayValue(field, value) {
 
 function fieldInput(object, field, value, prefix = "") {
   const name = `name="${prefix}${field.name}"`;
-  const wide = field.type === "longtext" || field.type === "multipicklist" ? "wide" : "";
+  const wide = ["longtext", "multipicklist", "people"].includes(field.type) ? "wide" : "";
   let input;
   if (field.type === "multipicklist") {
     const chosen = Array.isArray(value) ? value : [];
@@ -639,16 +656,19 @@ function fieldInput(object, field, value, prefix = "") {
     input = `<input type="checkbox" ${name} ${value ? "checked" : ""}>`;
   } else if (field.type === "longtext") {
     input = `<textarea ${name} rows="3">${esc(value)}</textarea>`;
-  } else if (field.type === "people") {  // legal guardians: any number, from their records or added here
+  } else if (field.type === "people") {  // guardians or youths: any number, from their records or added here
     const chosen = Array.isArray(value) ? value : [];  // [{id, name}]
+    const guardians = field.record_type === "Legal Guardian";
     input = `<div class="people-field" data-name="${prefix}${field.name}">
         <input type="checkbox" ${name} value="" data-multi hidden>
         <div class="people-chosen">${chosen.map((g) => guardianChip(name, g.id, g.name)).join("")}</div>
-        <select data-add-person><option value="">Add a legal guardian…</option>
-          ${(state.guardians || []).map((g) => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join("")}
-          <option value="__new">＋ New guardian…</option></select>
+        <select data-add-person><option value="">${guardians ? "Add a legal guardian…" : "Add a youth…"}</option>
+          ${((guardians ? state.guardians : state.patientChoices) || []).map((g) => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join("")}
+          <option value="__new">${guardians ? "＋ New guardian…" : "＋ New patient…"}</option></select>
         <div class="new-guardian" hidden><input data-new-first placeholder="First name"><input data-new-last placeholder="Last name">
           <button type="button" class="small secondary" data-new-add>Add</button></div></div>`;
+  } else if (field.suggest) {  // standard choices offered, anything else typed (how often a medication is taken)
+    input = `<input ${name} value="${esc(value)}" data-suggest="choices" data-field="${object}.${field.name}" placeholder="Choose or type">`;
   } else if (field.type === "zip") {
     input = `<input ${name} value="${esc(value)}" data-suggest="zip" inputmode="numeric" maxlength="10" placeholder="ZIP code or town">`;
   } else {
@@ -685,9 +705,10 @@ function detailsCard(object, data, editing) {
     .filter((d) => !people || recordType !== "Patient" || placementShows(d, record.placement, custom[d.name]));
   const heading = people && recordType === "Patient" ? `${record.placement || "Placement"} details` : `${recordType} details`;
   const guardians = data.guardians || [];
-  const value = (f) => f.type === "people" ? guardians : record[f.name];
+  const value = (f) => f.type === "people" ? data[f.name] || [] : record[f.name];
   const shown = (f) => f.type !== "people" ? display(object, f.name, record[f.name])
-    : guardians.length ? guardians.map((g) => recordLink(g.id, esc(g.name))).join(", ") : display(object, "guardian", record.guardian);
+    : (data[f.name] || []).length ? data[f.name].map((g) => recordLink(g.id, esc(g.name))).join(", ")
+    : display(object, "guardian", f.name === "guardians" ? record.guardian : "");
   const customView = typeDefs.length ? `<h3>${esc(heading)}</h3><div class="fields">${typeDefs.map((d) => {
       const source = sources[d.name];
       return `<div class="field ${d.type === "longtext" || d.type === "multipicklist" ? "wide" : ""}"><label>${esc(d.label)}
@@ -717,7 +738,7 @@ async function recordView(object, uid, editing = false) {
   const spec = state.objects[object];
   const record = data.record;
   const guardian = object === "patients" && record.record_type === "Legal Guardian";
-  if (editing && object === "patients") await loadGuardians();
+  if (editing && (object === "patients" || object === "incidents")) await loadPeople();
   const title = object === "drafts" ? `History draft · ${String(record.created).replace("T", " ").slice(0, 16)}`
     : object === "facts" ? (state.sectionTitles[record.section] || "Fact") : record[spec.title_field];
   $("#view").innerHTML = `
@@ -788,6 +809,38 @@ function newCottageForm(target) {
     return false;
   };
   form.querySelector("input")?.focus();
+}
+
+// A new incident, optionally already naming a patient (from their page)
+async function newIncidentForm(target, patient = null) {
+  await loadPeople();
+  const values = { date: todayText(), people: patient ? [patient] : [] };
+  target.innerHTML = `<form class="card" style="background:var(--panel-2);box-shadow:none" onsubmit="return false">
+      <div class="fields">${state.objects.incidents.fields.filter((f) => f.edit !== false).map((f) => fieldInput("incidents", f, values[f.name] ?? "")).join("")}</div>
+      <div class="actions" style="margin-top:12px"><button type="submit">Save incident</button>
+        <button type="button" class="secondary" data-cancel>Cancel</button><span class="error"></span></div></form>`;
+  const form = target.querySelector("form");
+  form.querySelector("[data-cancel]").onclick = () => target.innerHTML = "";
+  form.onsubmit = async () => {
+    try { location.hash = `#/r/incidents/${(await api("POST", "records/incidents", await withNewPeople(formValues(form)))).id}`; }
+    catch (err) { form.querySelector(".error").textContent = err.message; }
+    return false;
+  };
+  form.querySelector("input")?.focus();
+}
+
+function renderIncidents(data) {
+  const card = $("#incidentsCard"), rows = data.related.incidents || [], me = data.record.name;
+  card.innerHTML = `<h2>Incidents <span class="count">${rows.length}</span>
+      <span class="actions"><button class="secondary small" data-add>+ Add incident</button></span></h2>
+    <div class="add-box"></div>
+    ${rows.length ? `<ul class="due-list">${rows.map((i) => {
+      const others = (i.people || "").split(", ").filter((n) => n && n !== me);
+      return `<li><span class="due-when">${esc(i.date || "")}</span><span>${recordLink(i.id, esc(i.title))}
+        ${i.type ? `<span class="badge plain">${esc(i.type)}</span>` : ""}${i.severity ? ` <span class="badge ${i.severity === "Serious" ? "bad" : "plain"}">${esc(i.severity)}</span>` : ""}
+        ${others.length ? `<span class="muted small"> with ${esc(others.join(", "))}</span>` : ""}</span></li>`;
+    }).join("")}</ul>` : '<p class="empty">No incidents recorded. Add one here, or describe it in the bar at the top.</p>'}`;
+  card.querySelector("[data-add]").onclick = () => newIncidentForm(card.querySelector(".add-box"), { id: data.record.id, name: me });
 }
 
 function cottageExtras(data, body) {
@@ -874,6 +927,7 @@ function patientExtras(data, body) {
     <div id="noteBox"></div>
     <div id="buildBox"></div>
     <div class="card" id="followUpsCard"></div>
+    <div class="card" id="incidentsCard"></div>
     <div class="card" id="medsCard"></div>
     <div class="card" id="measuresCard"></div>
     <div class="card"><h2>Documents & notes <span class="count">${documents.length}</span></h2>
@@ -890,6 +944,7 @@ function patientExtras(data, body) {
   body.insertAdjacentHTML("afterbegin", glance(data));
   if (!$("#editForm")) $("#measuresCard").after(body.querySelector(".glance + .card"));  // the clinical cards first; details below
   renderFollowUps(uid, follow_ups);
+  renderIncidents(data);
   renderMeds(uid, medications);
   renderMeasures(uid, measures);
   $("#timeline").addEventListener("toggle", () => { if ($("#timeline").open) loadTimeline(uid); });
@@ -1290,7 +1345,7 @@ function renderMeasures(uid, rows) {
 }
 
 const TIMELINE_KINDS = { birth: "Born", placement: "Placement", document: "Document", medication: "Medication",
-  measure: "Score", follow_up: "Follow-up" };
+  measure: "Score", follow_up: "Follow-up", incident: "Incident" };
 
 async function loadTimeline(uid) {
   const box = $("#timelineBody");
@@ -2026,7 +2081,7 @@ function renderReply(reply) {
         <p class="muted small">${reply.rows.length} row${reply.rows.length === 1 ? "" : "s"}</p>` : '<p class="empty">No matching records.</p>'}
       <details><summary class="muted small">How this was looked up</summary><pre class="text-preview" style="font-family:var(--mono)">${esc(reply.sql)}</pre></details>`);
   } else if (reply.kind === "proposal") {
-    renderProposal(reply);
+    (reply.object === "incidents" ? loadPeople() : Promise.resolve()).then(() => renderProposal(reply));  // the youths to choose from
   } else if (reply.kind === "done") {
     showResult(`<p class="ok">✓ ${esc(reply.text)} ${recordLink(reply.id, "Open")}</p>`);
   } else {
@@ -2036,7 +2091,7 @@ function renderReply(reply) {
 
 function renderProposal(proposal) {
   const titles = { new_patient: "New patient", add_note: "New note", update_patient: "Update patient",
-    add_medication: "New medication", add_measure: "New score", add_follow_up: "New follow-up" };
+    add_medication: "New medication", add_measure: "New score", add_follow_up: "New follow-up", add_incident: "New incident" };
   let fields = "";
   if (proposal.object) {  // a medication, measure or follow-up
     fields = state.objects[proposal.object].fields.filter((f) => f.edit !== false).map((f) => fieldInput(proposal.object, f,
@@ -2058,6 +2113,8 @@ function renderProposal(proposal) {
       <h3 class="kicker">${titles[proposal.action]} · check before saving</h3>
       <p>${esc(proposal.summary)}${proposal.patient ? ` <b>${recordLink(proposal.patient.id, esc(proposal.patient.name))}</b>` : ""}</p>
       <div class="fields">${fields}</div>
+      ${(proposal.unsure || []).map((u) => `<p class="muted small">More than one patient matches “${esc(u.name)}”
+        (${u.matches.map((m) => esc(m.name)).join(", ")}): add the right one under Youths involved.</p>`).join("")}
       ${proposal.action === "new_patient" || proposal.object === "measures" ? '<div class="custom-fields"></div>' : ""}
       <div class="actions" style="margin-top:14px"><button type="submit">Save</button><button type="button" class="secondary" data-cancel>Cancel</button><span class="error"></span></div>
     </form>`);
@@ -2069,6 +2126,7 @@ function renderProposal(proposal) {
     const values = formValues(form);
     if (proposal.action === "update_patient") Object.keys(values).forEach((k) => { if (!(k in proposal.fields)) delete values[k]; });
     try {
+      if (proposal.action === "add_incident") await withNewPeople(values);  // youths not on file get their records first
       const done = await api("POST", "assistant/confirm", { proposal: { ...proposal, fields: values } });
       renderReply(done);
       $("#commandInput").value = "";
