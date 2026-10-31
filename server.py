@@ -29,6 +29,7 @@ import documents
 import history
 import intake
 import models
+import touchid
 import updater
 import vault
 import worker
@@ -239,14 +240,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             args[:] = [part for want, part in zip(pattern, parts) if want == "*"]
             return True
 
-        # Signing in. The password is passed straight to macOS and never kept.
+        # Signing in. The password is passed straight to macOS and never kept (Touch ID keeps it sealed: touchid.py).
         if is_("GET", "session"):
-            return {**vault.status(), "app_name": APP_NAME}
+            return {**vault.status(), "app_name": APP_NAME, "touch_id": touchid.is_on()}
         if is_("POST", "session", "setup"):
             vault.create(data["password"], data.get("name", ""))
             return vault.status()
         if is_("POST", "session", "unlock"):
             vault.unlock(data["password"])
+            return vault.status()
+        if is_("POST", "session", "touch-id"):  # Touch ID opens the sealed password, which then goes to macOS like a typed one
+            try:
+                vault.unlock(touchid.get_password(), method="Touch ID")
+            except touchid.Cancelled:
+                raise
+            except ValueError as error:
+                if str(error) == "Wrong password":  # the password was changed some other way
+                    touchid.turn_off()
+                    raise ValueError("Touch ID was turned off because the password changed. Sign in with your password.")
+                raise
             return vault.status()
         if is_("POST", "session", "lock"):
             vault.lock()
@@ -283,7 +295,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return {}
         if is_("POST", "settings", "password"):
             vault.change_password(data.get("current", ""), data.get("new", ""))
+            if touchid.is_on():
+                touchid.turn_on(data["new"])  # so Touch ID opens the new password
             return {}
+        if is_("GET", "settings", "touch-id"):
+            return {"available": touchid.available(), "on": touchid.is_on()}
+        if is_("POST", "settings", "touch-id"):
+            if not data.get("on"):
+                touchid.turn_off()
+                vault.log("turned off Touch ID")
+                return {"on": False}
+            vault.check_password(data.get("password", ""))
+            touchid.turn_on(data["password"])
+            try:  # one fingerprint now, to be sure it works before relying on it
+                if touchid.get_password() != data["password"]:
+                    raise ValueError("Touch ID didn't give back the right password, so it wasn't turned on")
+            except ValueError:
+                touchid.turn_off()
+                raise
+            vault.log("turned on Touch ID")
+            return {"on": True}
         if is_("GET", "audit.csv"):
             vault.log("exported the activity log")
             self.send_body(200, vault.export_audit().encode(), "text/csv; charset=utf-8")
@@ -291,7 +322,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if is_("GET", "objects"):
             return {"objects": vault.describe_objects(), "section_titles": history.SECTION_TITLES}
         if is_("GET", "records", "*"):
-            return vault.list_records(args[0], query.get("search", ""), query.get("patient"))
+            return vault.list_records(args[0], query.get("search", ""), query.get("patient"), record_type=query.get("type"))
         if is_("GET", "records", "*", "*"):
             return vault.get_record(*args)
         if is_("POST", "records", "*"):  # medications, measures and follow-ups name their patient in "patient_id"

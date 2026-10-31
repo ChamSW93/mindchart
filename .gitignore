@@ -13,4 +13,5 @@ __pycache__/
 .DS_Store
 .claude/
 tools/pdftext
+tools/touchid
 MindChart.app/

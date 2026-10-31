@@ -7,7 +7,8 @@ const SECURITY_HELP = {
   title: "How your records are protected",
   intro: "In plain terms, here's what keeps your records private, and what's up to you.",
   items: [
-    ["Encrypted on this Mac", "Everything in MindChart is kept in an encrypted vault on this Mac, using the encryption built into macOS. Only your password opens it, and the password isn't saved anywhere, so no one can open your records without it. Not even the developer."],
+    ["Encrypted on this Mac", "Everything in MindChart is kept in an encrypted vault on this Mac, using the encryption built into macOS. Only your password opens it, and the password isn't saved anywhere (unless you turn on Touch ID), so no one can open your records without it. Not even the developer."],
+    ["Touch ID, if you turn it on", "Your password is then kept locked by your Mac's Secure Enclave, the chip that handles Touch ID, and opens only with one of your fingerprints, on this Mac. If fingerprints are added or removed, MindChart asks for your password again. It's off unless you turn it on in Settings."],
     ["Never sent over the internet", "The AI runs on this Mac, so records are never sent to an online service. Files you upload go into your encrypted vault, not to the internet. Updates only download new versions of the app."],
     ["Locks itself", "MindChart locks after 15 minutes without use, when you click Lock, and when you quit. Locking takes everything off the screen."],
     ["Every access is recorded", "The Activity log notes who opened, changed, exported or deleted what, and when. It can't be edited, and Settings checks that it hasn't been tampered with."],
@@ -31,8 +32,19 @@ const HELP = {
   ] },
   "list:patients": { title: "Patients", intro: "Everyone you keep records for.", items: [
     ["Search", "Type any part of a name, ID or other detail."],
-    ["+ New patient", "Add someone. Their record type (such as Residential treatment or Foster care) decides which extra fields they have."],
+    ["+ New patient", "Add someone. Their placement (such as Residential treatment or Foster care) decides which extra details they have, and you can pick their legal guardian."],
     ["Open a patient", "Click a name to see their documents, facts, drafts and activity."],
+    ["Dates", "Type a date, or click the calendar in the box to pick one."],
+  ] },
+  "list:guardians": { title: "Guardians", intro: "Parents, relatives, foster parents and agencies legally responsible for your patients.", items: [
+    ["+ New guardian", "Add their name, relationship and contact details. You can also add one while editing a patient: under Legal guardian, choose New guardian."],
+    ["One guardian, several patients", "Siblings can share a guardian. Each guardian's page lists the patients they're responsible for."],
+    ["Patients and guardians", "Both are people in MindChart, with a record type of Patient or Legal Guardian. Guardians have IDs starting LG-, patients PT-."],
+  ] },
+  "record:guardians": { title: "A guardian's page", intro: "One legal guardian and the patients they're responsible for.", items: [
+    ["Edit", "Change their name, relationship or contact details. A new name shows on their patients' pages too."],
+    ["Guardian of", "The patients linked to them. To link another, open that patient, click Edit, and choose this guardian under Legal guardian."],
+    ["Delete", "Removes the guardian. Their patients stay, without a guardian linked."],
   ] },
   "record:patients": { title: "A patient's page", intro: "Everything about one patient.", items: [
     ["Upload documents", "Add their records. Files dropped on this page are suggested for this patient, and you'll be warned if one names someone else."],
@@ -104,6 +116,7 @@ const HELP = {
   settings: { title: "Settings", intro: "Your name, password and security.", items: [
     ["Your name", "Shown in the activity log next to everything you do."],
     ["Change password", "Your records are re-protected with the new one. A lost password can't be recovered."],
+    ["Touch ID", "Open MindChart with your fingerprint instead of typing your password. It's off until you turn it on, and your password still works."],
     ["Security", "Shows that your records are encrypted, whether this Mac's FileVault is on, and that the activity log is intact."],
     ["Tour and checklist", "Take the tour again, or bring back the getting-started checklist."],
   ] },
@@ -113,7 +126,7 @@ function currentScreen() {
   const parts = (location.hash.slice(1) || "/").split("/").filter(Boolean);
   if (!parts.length) return "home";
   if (parts[0] === "list") return `list:${parts[1]}`;
-  if (parts[0] === "r") return `record:${parts[1]}`;
+  if (parts[0] === "r") return parts[1] === "patients" && parts[2]?.startsWith("LG-") ? "record:guardians" : `record:${parts[1]}`;
   return HELP[parts[0]] ? parts[0] : "home";
 }
 

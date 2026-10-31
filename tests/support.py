@@ -42,6 +42,27 @@ def ensure_pdf_reader():
         subprocess.run(["swiftc", "-O", str(reader) + ".swift", "-o", str(reader)], check=True)
 
 
+def fake_touch_id(exit_code=0):
+    """Point touchid at a stand-in helper that "seals" by saving the password as is and never asks for a finger.
+    exit_code: what unlocking returns (2 cancelled, 3 fingerprints changed). Returns a function that undoes it."""
+    import touchid
+    script = DATA / "fake-touchid"
+    script.write_text(f"""#!/bin/sh
+case "$1" in
+  available) echo yes ;;
+  enroll) cat > "$2" ;;
+  unlock) [ {exit_code} -ne 0 ] && {{ echo "fake failure" >&2; exit {exit_code}; }}; cat "$2" ;;
+esac
+""")
+    script.chmod(0o755)
+    real, touchid.HELPER = touchid.HELPER, script
+
+    def undo():
+        touchid.HELPER = real
+        touchid.turn_off()
+    return undo
+
+
 @atexit.register
 def clean_up():
     vault.lock("tests finished")

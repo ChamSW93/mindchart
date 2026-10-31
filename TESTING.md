@@ -52,7 +52,7 @@ MindChart starts with a short tour of each part of the app. Take it (or skip it,
    - *Jordan's PHQ-A was 11 today*
    - *Remind me to renew Jordan's medication consent by 12/01*
    - *Who is on sertraline?*
-9. Browse **Patients**, **Documents** and **Facts**, open a record and **Edit** it.
+9. Browse **Patients**, **Guardians**, **Documents** and **Facts**, open a record and **Edit** it. Give a patient a legal guardian (choose **New guardian…** to add one), and try typing a date or picking one from the calendar in the box.
 10. Click **Lock MindChart**, then sign back in.
 
 ## Feedback

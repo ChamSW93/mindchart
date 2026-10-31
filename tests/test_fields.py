@@ -59,5 +59,16 @@ class DatesAndScores(unittest.TestCase):
         self.assertEqual(fields.measure_band("Vitals", 100), "")
 
 
+class Names(unittest.TestCase):
+    def test_full_names_split_into_first_and_last(self):
+        self.assertEqual(fields.split_name("Jordan Avery"), ("Jordan", "Avery"))
+        self.assertEqual(fields.split_name("Maria Test (fictional)"), ("Maria", "Test (fictional)"))  # the note stays with it
+        self.assertEqual(fields.split_name("ACS"), ("ACS", ""))
+        self.assertEqual(fields.full_name("Mary Ann", " De Luca "), "Mary Ann De Luca")
+
+    def test_gender_as_people_write_it(self):
+        self.assertEqual([fields.normalize_gender(g) for g in ("boy", "F", "non-binary", "")], ["Male", "Female", "X", ""])
+
+
 if __name__ == "__main__":
     unittest.main()

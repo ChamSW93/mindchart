@@ -56,7 +56,7 @@ curl -fsSL "$RELEASE_URL" -o "$TEMP/MindChart.zip"
 mkdir -p "$DEST"
 unzip -oq "$TEMP/MindChart.zip" -d "$DEST"
 rm -rf "$TEMP"
-chmod +x "$DEST/Start MindChart.command" "$DEST/tools/pdftext" "$DEST/MindChart.app/Contents/MacOS/MindChart" 2> /dev/null || true
+chmod +x "$DEST/Start MindChart.command" "$DEST/tools/pdftext" "$DEST/tools/touchid" "$DEST/MindChart.app/Contents/MacOS/MindChart" 2> /dev/null || true
 # The app goes in Applications, or in the home folder's Applications if this account can't add apps there.
 APPS="${MINDCHART_APPS:-/Applications}"  # (tests use their own folder)
 WHERE="your Applications folder"

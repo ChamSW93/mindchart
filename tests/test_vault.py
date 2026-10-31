@@ -39,6 +39,9 @@ class Records(unittest.TestCase):
 
     def test_questions_can_only_read(self):
         self.assertEqual(self.vault.run_query("SELECT COUNT(*) AS n FROM patients_view")["columns"], ["n"])
+        # What bonsai-2:9b wrote: a good query with "; }" after it; and a semicolon inside quotes isn't an end
+        self.assertEqual(self.vault.run_query("SELECT 1 AS n FROM patients_view LIMIT 1; }")["columns"], ["n"])
+        self.assertEqual(self.vault.run_query("SELECT 'a;b' AS t")["rows"], [["a;b"]])
         for sql in ["DELETE FROM patients", "UPDATE patients SET name = 'x'", "SELECT 1; DELETE FROM patients",
                     "WITH x AS (SELECT 1) DELETE FROM patients"]:
             with self.assertRaises(Exception, msg=sql):
@@ -70,9 +73,11 @@ class RecordTypes(unittest.TestCase):
         self.assertIn("program: 21-day stabilization → 60-day stabilization", entry["detail"])
         self.assertTrue(self.vault.verify_audit()["ok"])
 
-    def test_new_patients_default_to_residential(self):
+    def test_new_people_are_patients(self):
         uid = self.vault.create_record("patients", {"name": "Default Type"})
-        self.assertEqual(self.vault.get_record("patients", uid)["record"]["record_type"], "Residential treatment")
+        record = self.vault.get_record("patients", uid)["record"]
+        self.assertEqual((record["record_type"], record["status"], record["placement"]), ("Patient", "Active", None))
+        self.assertTrue(uid.startswith("PT-"))
 
     def test_ai_values_never_overwrite_a_persons_edit(self):
         patient = self.vault.create_record("patients", {"name": "AI Fill Test"})
@@ -91,20 +96,20 @@ class RecordTypes(unittest.TestCase):
     def test_changing_a_fields_type_converts_values(self):
         for name, cottage in (("Cottage A", "Cottage 2"), ("Cottage B", "cottage 3"), ("Cottage C", "the blue house")):
             self.vault.create_record("patients", {"name": name, "cottage": cottage})
-        preview = self.vault.preview_field_change("patients", "Residential treatment", "cottage", "picklist",
+        preview = self.vault.preview_field_change("patients", "Patient", "cottage", "picklist",
                                                   ["Cottage 1", "Cottage 2", "Cottage 3"])
         self.assertGreaterEqual(preview["converted"], 2)  # other tests' patients may be counted too
         self.assertIn("the blue house", [u["value"] for u in preview["unfit"]])
-        self.vault.change_field_type("patients", "Residential treatment", "cottage", "picklist",
+        self.vault.change_field_type("patients", "Patient", "cottage", "picklist",
                                      ["Cottage 1", "Cottage 2", "Cottage 3"])
         cottages = {r["name"]: self.vault.get_record("patients", r["id"])["custom"].get("cottage")
                     for r in self.vault.list_records("patients", "Cottage ")["rows"] if r["name"].startswith("Cottage ")}
         self.assertEqual(cottages, {"Cottage A": "Cottage 2", "Cottage B": "Cottage 3", "Cottage C": ""})
-        field = next(d for d in self.vault.definitions_for("patients", "Residential treatment") if d["name"] == "cottage")
+        field = next(d for d in self.vault.definitions_for("patients", "Patient") if d["name"] == "cottage")
         self.assertEqual(field["type"], "picklist")
         with self.assertRaises(ValueError):  # the new type is enforced from now on
             self.vault.create_record("patients", {"name": "Cottage D", "cottage": "Cottage 9"})
-        self.vault.change_field_type("patients", "Residential treatment", "cottage", "text")  # back, for other tests
+        self.vault.change_field_type("patients", "Patient", "cottage", "text")  # back, for other tests
 
 
 class Uploads(unittest.TestCase):
@@ -269,6 +274,14 @@ class SigningIn(unittest.TestCase):
         vault.unlock(support.PASSWORD)
         self.assertIn("after 5 wrong password attempts", vault.list_records("activity")["rows"][0]["action"])
 
+    def test_password_can_be_checked_while_open(self):
+        vault = support.unlocked_vault()
+        vault.check_password(support.PASSWORD)
+        with self.assertRaisesRegex(ValueError, "isn't right"):
+            vault.check_password("not-the-password")
+        vault.lock()
+        vault.unlock(support.PASSWORD)  # checking changed nothing
+
     def test_password_can_be_changed(self):
         vault = support.unlocked_vault()
         with self.assertRaisesRegex(ValueError, "current password"):
@@ -283,6 +296,69 @@ class SigningIn(unittest.TestCase):
         vault._failed_attempts = 0
 
 
+class People(unittest.TestCase):
+    """Patients and legal guardians: one object, two record types."""
+    @classmethod
+    def setUpClass(cls):
+        cls.vault = support.unlocked_vault()
+
+    def test_names_are_first_and_last(self):
+        uid = self.vault.create_record("patients", {"first_name": "Riley", "last_name": "Moss (fictional)"})
+        self.assertEqual(self.vault.get_record("patients", uid)["record"]["name"], "Riley Moss (fictional)")
+        self.vault.update_record("patients", uid, {"first_name": "Rylee"})
+        self.assertEqual(self.vault.get_record("patients", uid)["record"]["name"], "Rylee Moss (fictional)")
+        typed = self.vault.create_record("patients", {"name": "Dana Q Reyes"})  # a full name, from the command bar
+        record = self.vault.get_record("patients", typed)["record"]
+        self.assertEqual((record["first_name"], record["last_name"]), ("Dana Q", "Reyes"))
+        with self.assertRaisesRegex(ValueError, "first or last name"):
+            self.vault.create_record("patients", {"first_name": " ", "last_name": ""})
+
+    def test_gender_is_male_female_or_x(self):
+        uid = self.vault.create_record("patients", {"name": "Gender Test", "gender": "girl"})
+        self.assertEqual(self.vault.get_record("patients", uid)["record"]["gender"], "Female")
+        with self.assertRaisesRegex(ValueError, "Male, Female, X"):
+            self.vault.update_record("patients", uid, {"gender": "Unknown"})
+
+    def test_placement_used_to_be_the_record_type(self):
+        uid = self.vault.create_record("patients", {"name": "Placement Test", "record_type": "Foster care", "agency": "Agency A"})
+        data = self.vault.get_record("patients", uid)
+        self.assertEqual((data["record"]["record_type"], data["record"]["placement"]), ("Patient", "Foster care"))
+        self.assertEqual(data["custom"]["agency"], "Agency A")
+
+    def test_a_guardian_typed_in_before_stays_until_one_is_chosen(self):
+        uid = self.vault.create_record("patients", {"name": "Typed Guardian Test"})
+        with self.vault.connect() as db:  # as version 6 leaves a patient whose guardian was typed in
+            db.execute("UPDATE patients SET guardian = 'Foster mother (Ms. R)' WHERE uid = ?", (uid,))
+        self.vault.update_record("patients", uid, {"mrn": "123", "guardian_uid": ""})  # the edit form sends "None"
+        self.assertEqual(self.vault.get_record("patients", uid)["record"]["guardian"], "Foster mother (Ms. R)")
+
+    def test_guardians_link_to_patients(self):
+        guardian = self.vault.create_record("patients", {"first_name": "Lena", "last_name": "Ortiz (fictional)",
+                                                         "record_type": "Legal Guardian", "relationship": "Grandparent"})
+        self.assertTrue(guardian.startswith("LG-"))
+        self.assertIsNone(self.vault.get_record("patients", guardian)["record"]["status"])  # status is for patients
+        first = self.vault.create_record("patients", {"name": "Ana Ortiz (fictional)", "guardian_uid": guardian})
+        second = self.vault.create_record("patients", {"name": "Ben Ortiz (fictional)"})
+        self.vault.update_record("patients", second, {"guardian_uid": guardian})
+        self.assertEqual(self.vault.get_record("patients", first)["record"]["guardian"], "Lena Ortiz (fictional)")
+        wards = self.vault.get_record("patients", guardian)["related"]["guardian_of"]
+        self.assertEqual([w["name"] for w in wards], ["Ana Ortiz (fictional)", "Ben Ortiz (fictional)"])
+        # Guardians are listed apart from patients, and uploads never match them
+        self.assertNotIn(guardian, [r["id"] for r in self.vault.list_records("patients")["rows"]])
+        listed = self.vault.list_records("patients", record_type="Legal Guardian")["rows"]
+        self.assertIn("Ana Ortiz (fictional), Ben Ortiz (fictional)", [r["guardian_of"] for r in listed if r["id"] == guardian])
+        self.assertNotIn(guardian, [p["id"] for p in self.vault.patients_for_matching()])
+        # A new name follows to their patients; only a guardian can be chosen; deleting one unlinks their patients
+        self.vault.update_record("patients", guardian, {"first_name": "Lina"})
+        self.assertEqual(self.vault.get_record("patients", second)["record"]["guardian"], "Lina Ortiz (fictional)")
+        with self.assertRaisesRegex(ValueError, "legal guardian from the list"):
+            self.vault.update_record("patients", second, {"guardian_uid": first})
+        self.vault.delete_record("patients", guardian)
+        record = self.vault.get_record("patients", first)["record"]
+        self.assertEqual((record["guardian_id"], record["guardian"]), (None, ""))
+        self.assertIn("deleted legal guardian", [r["action"] for r in self.vault.list_records("activity")["rows"][:3]])
+
+
 class Upgrades(unittest.TestCase):
     """Upgrading saved data, on a plain database file (the steps don't depend on encryption)."""
 
@@ -295,6 +371,7 @@ class Upgrades(unittest.TestCase):
                 patient_id INTEGER REFERENCES patients(id) ON DELETE SET NULL, time TEXT, action TEXT, detail TEXT);
             INSERT INTO patients (uid, name) VALUES ('PT-AAAAAA', 'Old Patient');
             INSERT INTO patients (uid, name, placement, admitted) VALUES ('PT-BBBBBB', 'Placed Patient', 'Cottage 4', '01/02/2026');
+            INSERT INTO patients (uid, name, gender) VALUES ('PT-CCCCCC', 'Girl Patient', 'F'), ('PT-DDDDDD', 'Other Patient', 'Nonbinary');
             INSERT INTO activity (uid, patient_id, time, action, detail) VALUES ('ACT-AAAAAA', 1, '2026-01-01T09:00:00', 'created patient', '');
             PRAGMA user_version = 1;""")
         return db
@@ -315,8 +392,14 @@ class Upgrades(unittest.TestCase):
             self.assertEqual(row["patient_uid"], "PT-AAAAAA")
             self.assertTrue(row["hash"])
             # Version 3: the old placement and admission date moved into the Residential treatment record type.
-            placed = db.execute("SELECT record_type, custom FROM patients WHERE uid = 'PT-BBBBBB'").fetchone()
-            self.assertEqual(placed["record_type"], "Residential treatment")
+            # Version 6: that record type became the placement of a Patient, with the name split in two.
+            placed = db.execute("SELECT * FROM patients WHERE uid = 'PT-BBBBBB'").fetchone()
+            self.assertEqual((placed["record_type"], placed["placement"]), ("Patient", "Residential treatment"))
+            self.assertEqual((placed["first_name"], placed["last_name"]), ("Placed", "Patient"))
+            genders = dict(db.execute("SELECT uid, gender FROM patients WHERE uid IN ('PT-CCCCCC', 'PT-DDDDDD')").fetchall())
+            self.assertEqual(genders, {"PT-CCCCCC": "Female", "PT-DDDDDD": "X"})
+            self.assertEqual([r[0] for r in db.execute("SELECT name FROM record_types WHERE object = 'patients' ORDER BY position")],
+                             ["Patient", "Legal Guardian"])
             self.assertEqual(json.loads(placed["custom"]), {"cottage": "Cottage 4", "admission_date": "01/02/2026"})
             self.assertTrue(db.execute("SELECT COUNT(*) FROM field_defs").fetchone()[0])
             self.assertTrue(list((Path(folder) / "backups").glob("records-*.db")))

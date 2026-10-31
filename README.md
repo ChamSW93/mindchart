@@ -20,12 +20,13 @@ This puts **MindChart.app** in the Applications folder (and Launchpad), download
 
 ## Using it
 
-- **Sign in.** The first launch asks for your name (shown in the activity log) and a password, which encrypts all of MindChart's data. Every launch after that asks for the password. MindChart locks itself after 15 minutes without activity, when 🔒 Lock is clicked, and when the app quits or crashes. After 5 wrong passwords, each further attempt has to wait. **A lost password can't be recovered.** It can be changed in **Settings**.
+- **Sign in.** The first launch asks for your name (shown in the activity log) and a password, which encrypts all of MindChart's data. Every launch after that asks for the password, or a fingerprint once **Touch ID** is turned on in Settings (the password is then kept encrypted by the Mac's Secure Enclave, and opens only after Touch ID on that Mac). MindChart locks itself after 15 minutes without activity, when 🔒 Lock is clicked, and when the app quits or crashes. After 5 wrong passwords, each further attempt has to wait. **A lost password can't be recovered.** It can be changed in **Settings**.
 - **A tour, and help on every page.** The first time MindChart opens (and once after updating to 0.5.0), a short tour points out each part of the app; it can be skipped. A getting-started checklist on Home ticks itself off as each feature is tried. The **?** button next to the command bar explains what can be done on the current page, and Settings can restart the tour.
 - **Security, in plain language.** A green padlock marks where records are protected: the sign-in screen, the sidebar ("Encrypted · on this Mac"), Uploads and Settings. Clicking it explains, in plain terms, what keeps records private and what's up to the clinician (exported Word files, the Mac's own FileVault and screen lock).
-- **Records, like a CRM.** Patients, Follow-ups, Medications, Documents, Facts, Drafts and Activity each have a list view and record pages. Every record has its own ID with a prefix for its type, such as `PT-7K3M9Q` (patient), `FUP-…`, `MED-…`, `MSR-…` (measure), `DOC-…`, `FCT-…`, `DRF-…` and `ACT-…`.
-- **Object → record type → fields.** Patients and documents have **record types**, and each record type adds its own fields to the object's shared ones:
-  - Patients: Residential treatment (cottage, admission and expected discharge dates), Crisis / stabilization, Foster care and Outpatient / community.
+- **Records, like a CRM.** Patients, Guardians, Follow-ups, Medications, Documents, Facts, Drafts and Activity each have a list view and record pages. Every record has its own ID with a prefix for its type, such as `PT-7K3M9Q` (patient), `LG-…` (legal guardian), `FUP-…`, `MED-…`, `MSR-…` (measure), `DOC-…`, `FCT-…`, `DRF-…` and `ACT-…`.
+- **Dates.** Every date box can be typed into ("3/4/24" becomes 03/04/2024) or filled from a small calendar, with month and year lists for dates of birth. Partial dates like "2019" are kept as typed.
+- **Object → record type → fields.** People and documents have **record types**, and each record type adds its own fields to the object's shared ones:
+  - People: **Patient** and **Legal Guardian**. Everyone has a first and last name. Patients also have date of birth, gender (Male, Female or X), MRN, status, a **placement** (Residential treatment, Crisis / stabilization, Foster care or Outpatient / community), whose own details show for it (cottage and admission dates, program, foster home and caseworker, clinic), and a **legal guardian**, picked from the guardians' records (or added on the spot). Guardians have a relationship, organization, phone, email and address, and their page lists the patients they're responsible for, so siblings can share one.
   - Documents: Court Order (case type, court, docket number, judge, dates, order of protection, visitation terms), IEP (classification, class ratio, school, grade, services, accommodations, behavior plan), Psychological Evaluation (examiner, tests, Full Scale IQ and index scores), Psychiatric Evaluation, Discharge Summary, Progress Note, Clinician Note and Other. New document types (say, Safety Plan) can be added from an upload's review card.
 
   When a document is read, **the AI fills in its record type's fields**, each backed by an exact quote that's checked against the source and shown under the value with an **✦ AI** badge. Values that someone has edited are never overwritten. The full list is in `fields.py`.
@@ -68,7 +69,7 @@ Running offline removes the biggest risk, which is sending records to a cloud AI
 - Store exported Word drafts and the original files only where the organization allows. Inside MindChart, everything is in the encrypted store.
 - Don't point AI coding assistants (which use the cloud) at real records. Develop with the fictional samples only.
 
-**Where the data is:** `~/Library/Application Support/MindChart/Patient Records.sparsebundle`, an AES-256 encrypted disk image built into macOS. Its password is never stored. Uploads waiting for review and the examples MindChart learns from are kept there too, and an example is deleted along with its document. Time Machine backs it up still encrypted. Every sign-in, view, edit (with old and new values), build, export and deletion is recorded under Activity, in a tamper-evident log that Settings can verify and export.
+**Where the data is:** `~/Library/Application Support/MindChart/Patient Records.sparsebundle`, an AES-256 encrypted disk image built into macOS. Its password is never stored, unless Touch ID is turned on (`touchid.json` next to it, sealed by the Secure Enclave). Uploads waiting for review and the examples MindChart learns from are kept there too, and an example is deleted along with its document. Time Machine backs it up still encrypted. Every sign-in, view, edit (with old and new values), build, export and deletion is recorded under Activity, in a tamper-evident log that Settings can verify and export.
 
 **Error log:** `~/Library/Logs/MindChart`. It records what failed and where, never record contents, so it's safe to send when reporting a problem.
 
@@ -103,14 +104,15 @@ macOS "Reduce motion" turns animations off. Other downloaded models can be picke
 scripts/test.sh
 ```
 
-107 automated tests cover:
+122 automated tests cover:
 - document reading, including OCR of scans, photos, sideways pages and pictures in Word files
 - uploads, patient matching (including the wrong-sibling warning) and learning document types
 - background reading, quote checking and citations, and the drafting flow
 - record types and field types, including converting a field's type and adding new types
+- people: first and last names, gender, placements, and guardians linked to patients
 - medications (including suggestions from the records), rating scales and their bands, follow-ups, Coming up and the timeline
 - visit notes, and searching inside documents
-- AI-filled fields, the encrypted store, the audit trail, sign-in limits and password changes
+- AI-filled fields, the encrypted store, the audit trail, sign-in limits, password changes and Touch ID
 - data upgrades, the command bar, the getting-started checklist, the server's security checks and the updater They run on **Apple's built-in Python** (the one every Mac has), so code that only works with a newer Python can't slip through. They also run automatically on GitHub for every change. They don't need the AI model: stand-in answers take its place.
 
 ## Updates
@@ -146,6 +148,7 @@ This runs the tests (and stops if any fail), builds the PDF reader and the Mac a
 | `tools/MindChartApp.swift` | The Mac app: its window, menus, file pickers and Save dialogs |
 | `tools/make_icon.swift` | Draws the app icon |
 | `tools/pdftext.swift` | PDF and image reader with OCR (any orientation), using built-in macOS frameworks |
+| `touchid.py`, `tools/touchid.swift` | Optional Touch ID sign-in: the password sealed by a Secure Enclave key that needs a fingerprint |
 | `scripts/build_app.sh` | Builds MindChart.app |
 | `scripts/test.sh`, `tests/` | The automated tests |
 | `scripts/release.sh` | Publishes a new version (only if the tests pass) |

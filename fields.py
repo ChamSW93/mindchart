@@ -25,27 +25,39 @@ def ai(name, label, type="text", options=None):
     return field(name, label, type, options, ai=True)
 
 
+# People are patients or legal guardians (the "patients" object holds both; its record type says which).
+# A patient's placement decides which of the Patient type's own fields apply.
+PLACEMENT_FIELDS = {
+    "Residential treatment": ["cottage", "admission_date", "expected_discharge"],
+    "Crisis / stabilization": ["program", "admission_date", "planned_discharge"],
+    "Foster care": ["foster_home", "agency", "caseworker", "placement_date"],
+    "Outpatient / community": ["clinic", "referral_source"],
+}
+PLACEMENTS = list(PLACEMENT_FIELDS)
+GENDERS = ["Male", "Female", "X"]
+
 DEFAULT_RECORD_TYPES = {
     "patients": {
-        "Residential treatment": [
+        "Patient": [
             field("cottage", "Cottage / unit"),
             field("admission_date", "Admission date", "date"),
             field("expected_discharge", "Expected discharge", "date"),
-        ],
-        "Crisis / stabilization": [
             field("program", "Program", "picklist", ["Crisis residence", "21-day stabilization", "60-day stabilization", "Other"]),
-            field("admission_date", "Admission date", "date"),
             field("planned_discharge", "Planned discharge", "date"),
-        ],
-        "Foster care": [
             field("foster_home", "Foster home"),
             field("agency", "Agency"),
             field("caseworker", "Caseworker"),
             field("placement_date", "Placement date", "date"),
-        ],
-        "Outpatient / community": [
             field("clinic", "Clinic"),
             field("referral_source", "Referral source"),
+        ],
+        "Legal Guardian": [
+            field("relationship", "Relationship", "picklist",
+                  ["Parent", "Grandparent", "Other relative", "Foster parent", "Agency (e.g. ACS)", "Other"]),
+            field("organization", "Agency or organization"),
+            field("phone", "Phone"),
+            field("email", "Email"),
+            field("address", "Address", "longtext"),
         ],
     },
     "documents": {
@@ -146,6 +158,8 @@ def measure_band(measure, score):
 
 # What each document type is, for the AI that recognizes uploads. Types added later carry their own description.
 TYPE_DESCRIPTIONS = {
+    "Patient": "a child or adolescent seen for psychiatric care",
+    "Legal Guardian": "a parent, relative, foster parent or agency legally responsible for a patient",
     "Court Order": "an order, decision or petition from a court",
     "Individualized Education Program (IEP)": "a school special education plan (classification, services, goals)",
     "Psychological Evaluation": "a psychologist's testing report (IQ, achievement or personality tests)",
@@ -253,3 +267,26 @@ def display(value):
     if isinstance(value, bool):
         return "Yes" if value else "No"
     return str(value) if value not in (None, "") else "(blank)"
+
+
+# --- People's names and gender ----------------------------------------------------
+
+def split_name(name):
+    """A full name as (first, last): the last word is the last name, with any note in brackets after it.
+    "Jordan Avery" -> ("Jordan", "Avery"); "Maria Test (fictional)" -> ("Maria", "Test (fictional)")."""
+    base, note = re.match(r"^(.*?)\s*(\([^()]*\))?$", " ".join((name or "").split())).groups()
+    words = base.split(" ") if base else [""]
+    first, last = (" ".join(words[:-1]), words[-1]) if len(words) > 1 else (words[0], "")
+    return first, " ".join(part for part in (last, note) if part)
+
+
+def full_name(first, last):
+    return " ".join(f"{first or ''} {last or ''}".split())
+
+
+def normalize_gender(value):
+    """Gender as one of GENDERS, from how people (or the AI) write it. Anything unrecognized is left for checking."""
+    text = (value or "").strip()
+    known = {"m": "Male", "male": "Male", "boy": "Male", "man": "Male", "f": "Female", "female": "Female", "girl": "Female",
+             "woman": "Female", "x": "X", "nonbinary": "X", "non-binary": "X", "non binary": "X"}
+    return known.get(text.lower(), text)

@@ -86,7 +86,7 @@ def install(release):
         for name in old_files - new_files - KEEP:  # files a newer version no longer uses
             if name and (HERE / name).is_file():
                 (HERE / name).unlink()
-    for executable in ("Start MindChart.command", "tools/pdftext", "MindChart.app/Contents/MacOS/MindChart"):
+    for executable in ("Start MindChart.command", "tools/pdftext", "tools/touchid", "MindChart.app/Contents/MacOS/MindChart"):
         if (HERE / executable).exists():
             (HERE / executable).chmod(0o755)
     # The app in Applications is a copy; refresh it too, so changes to the app itself reach everyone.

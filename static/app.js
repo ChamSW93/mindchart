@@ -3,11 +3,12 @@
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = { session: null, objects: null, sectionTitles: {}, models: [], dirtyDraft: false, work: {}, uploads: null };
-const ICONS = { patients: "i-patients", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity",
+const ICONS = { patients: "i-patients", guardians: "i-guardian", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity",
   medications: "i-meds", measures: "i-measures", follow_ups: "i-follow" };
-const PREFIXES = { PT: "patients", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity", MED: "medications",
+const PREFIXES = { PT: "patients", LG: "patients", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity", MED: "medications",
   MSR: "measures", FUP: "follow_ups" };
-const HIDDEN_COLUMNS = ["patient_id", "document_id", "notes", "quote", "read_by_model", "seq", "details", "read_state"];
+const HIDDEN_COLUMNS = ["patient_id", "document_id", "notes", "quote", "read_by_model", "seq", "details", "read_state",
+  "first_name", "last_name", "record_type", "guardian_id"];
 const READ_STATES = { queued: "Waiting to be read", fields: "Updating details", read: "Read", failed: "Couldn't read" };
 const EXAMPLES = [
   "Which patients have an order of protection?",
@@ -104,8 +105,27 @@ async function start() {
     document.documentElement.dataset.effects = reduced ? "minimal" : state.system.effects;
   } catch {}
   state.session = await (await fetch("/api/session")).json();
-  if (state.session.unlocked) enterApp(); else showSignin();
+  if (state.session.unlocked) enterApp();
+  else {
+    showSignin();
+    if (state.session.touch_id) useTouchId();  // once, when MindChart opens (not when it locks itself while you're away)
+  }
 }
+
+async function useTouchId() {
+  $("#touchIdBtn").disabled = true;
+  $("#signinError").textContent = "";
+  try {
+    state.session = { ...state.session, ...(await api("POST", "session/touch-id")) };
+    await enterApp();
+  } catch (err) {
+    if (/turned off/.test(err.message)) { state.session.touch_id = false; $("#touchIdBtn").hidden = true; }
+    $("#signinError").textContent = /cancelled/.test(err.message) ? "" : err.message;
+    $("#password").focus();
+  }
+  $("#touchIdBtn").disabled = false;
+}
+$("#touchIdBtn").onclick = useTouchId;
 
 function showSignin(message = "") {
   state.dirtyDraft = false;
@@ -122,6 +142,8 @@ function showSignin(message = "") {
   $("#password").autocomplete = setUp ? "current-password" : "new-password";
   $("#password").placeholder = setUp ? "Password" : `New password (${state.session?.min_password_length || 10}+ characters)`;
   $("#signinBtn").textContent = setUp ? "Unlock" : "Set up MindChart";
+  $("#touchIdBtn").hidden = !(setUp && state.session?.touch_id);
+  $("#signinSecure").textContent = `Your records are encrypted on this Mac. Only your password${state.session?.touch_id ? " or your fingerprint" : ""} opens them.`;
   $("#signinFine").textContent = setUp ? "" :
     "Your records are encrypted with this password. Keep it somewhere safe: if it's lost, the records can't be recovered.";
   $("#signinError").textContent = "";
@@ -215,12 +237,15 @@ window.addEventListener("beforeunload", (e) => { if (state.dirtyDraft) e.prevent
 
 function renderNav() {
   const here = location.hash || "#/";
-  const items = [["#/", "Home", "i-home"], ["#/uploads", "Uploads", "i-upload"],
-    ...["patients", "follow_ups", "medications", "documents", "facts", "drafts", "activity"]
+  const items = [["#/", "Home", "i-home"], ["#/uploads", "Uploads", "i-upload"], ["#/list/patients", "Patients", ICONS.patients],
+    ["#/list/guardians", "Guardians", ICONS.guardians],
+    ...["follow_ups", "medications", "documents", "facts", "drafts", "activity"]
     .map((o) => [`#/list/${o}`, state.objects[o].plural, ICONS[o]]), ["#/settings", "Settings", "i-settings"]];
+  // People's pages are all under #/r/patients/: PT-... for patients, LG-... for guardians
+  const pages = { patients: "#/r/patients/PT-", guardians: "#/r/patients/LG-" };
   $("#nav").innerHTML = items.map(([href, text, icon]) => {
     const object = href.split("/")[2];
-    const active = here === href || (object && here.startsWith(`#/r/${object}/`)) ? "active" : "";
+    const active = here === href || (object && here.startsWith(pages[object] || `#/r/${object}/`)) ? "active" : "";
     const badge = href === "#/uploads" ? `<span class="nav-badge" id="uploadsBadge" ${state.work.uploads ? "" : "hidden"}>${state.work.uploads || ""}</span>` : "";
     return `<a href="${href}" class="${active}"><span class="${icon}"></span>${esc(text)}${badge}</a>`;
   }).join("");
@@ -244,7 +269,7 @@ async function route() {
   const parts = (location.hash.slice(1) || "/").split("/").filter(Boolean);
   try {
     if (!parts.length) await homeView();
-    else if (parts[0] === "list") await listView(parts[1]);
+    else if (parts[0] === "list") await (parts[1] === "guardians" ? listView("patients", "", "Legal Guardian") : listView(parts[1]));
     else if (parts[0] === "r") await recordView(parts[1], decodeURIComponent(parts[2]));
     else if (parts[0] === "settings") await settingsView();
     else if (parts[0] === "uploads") await uploadsView();
@@ -300,7 +325,7 @@ async function homeView() {
       <h2>Patients <span class="count">${patients.length}</span>
         <span class="actions"><button class="small" id="newPatient">+ New patient</button></span></h2>
       <div id="newPatientForm"></div>
-      ${patients.length ? recordsTable("patients", patients, ["id", "name", "record_type", "dob", "status", "documents"])
+      ${patients.length ? recordsTable("patients", patients, ["id", "name", "placement", "dob", "status", "documents"])
         : '<p class="empty">No patients yet. Add one with the button above or the command bar.</p>'}
     </div>`;
   $("#view").querySelectorAll("[data-example]").forEach((b) => b.onclick = () => runCommand(b.dataset.example));
@@ -310,24 +335,71 @@ async function homeView() {
   renderComingUp();
 }
 
-function newPatientForm(target) {
-  const fields = state.objects.patients.fields.filter((f) => f.edit !== false);
+async function newPatientForm(target, recordType = "Patient") {
+  await loadGuardians();
+  const fields = personFields(recordType);
   target.innerHTML = `<form class="card" style="background:var(--panel-2);box-shadow:none" onsubmit="return false">
-      <div class="fields">${fields.map((f) => fieldInput("patients", f, f.name === "status" ? "Active" : f.name === "record_type" ? f.options[0] : "")).join("")}</div>
+      <input type="hidden" name="record_type" value="${esc(recordType)}">
+      <div class="fields">${fields.map((f) => fieldInput("patients", f, f.name === "status" ? "Active" : "")).join("")}</div>
       <div class="custom-fields"></div>
-      <div class="actions" style="margin-top:12px"><button type="submit">Save patient</button>
+      <div class="actions" style="margin-top:12px"><button type="submit">Save ${recordType === "Patient" ? "patient" : "guardian"}</button>
         <button type="button" class="secondary" data-cancel>Cancel</button><span class="error"></span></div></form>`;
   const form = target.querySelector("form");
   bindRecordType(form, "patients", {}, "custom.");
   form.querySelector("[data-cancel]").onclick = () => target.innerHTML = "";
   form.onsubmit = async () => {
     try {
-      const { id } = await api("POST", "records/patients", formValues(form));
+      const { id } = await api("POST", "records/patients", await withNewGuardian(formValues(form)));
       location.hash = `#/r/patients/${id}`;
     } catch (err) { form.querySelector(".error").textContent = err.message; }
     return false;
   };
-  form.querySelector("input")?.focus();
+  form.querySelector("input:not([type=hidden])")?.focus();
+}
+
+// --- People: patients and legal guardians are two record types of one object ------------
+
+const forType = (field, recordType) => !field.for || field.for.includes(recordType);
+
+// The fields people fill in for a patient or a guardian (the record type itself is set by the page).
+const personFields = (recordType) => state.objects.patients.fields.filter((f) =>
+  f.edit !== false && !f.hidden && f.name !== "record_type" && forType(f, recordType));
+
+// A patient's placement decides which of the Patient type's own fields apply. Fields with a value always show.
+function placementShows(def, placement, value) {
+  const lists = state.objects.patients.placement_fields || {};
+  const anywhere = Object.values(lists).some((names) => names.includes(def.name));
+  return !anywhere || (lists[placement] || []).includes(def.name) || (value !== undefined && value !== null && value !== "");
+}
+
+async function loadGuardians() {
+  state.guardians = (await api("GET", "records/patients?type=Legal%20Guardian")).rows;
+}
+
+// "New guardian…" in a Legal guardian list: make the guardian's record first, then link to it.
+async function withNewGuardian(values) {
+  const first = (values["new_guardian.first_name"] || "").trim(), last = (values["new_guardian.last_name"] || "").trim();
+  delete values["new_guardian.first_name"];
+  delete values["new_guardian.last_name"];
+  if (values.guardian_uid === "__new") {
+    if (!first && !last) throw new Error("Enter the new guardian's name");
+    values.guardian_uid = (await api("POST", "records/patients", { record_type: "Legal Guardian", first_name: first, last_name: last })).id;
+  }
+  return values;
+}
+
+document.addEventListener("change", (e) => {
+  if (!e.target.matches("select[data-person]")) return;
+  const box = e.target.parentElement.querySelector(".new-guardian");
+  box.hidden = e.target.value !== "__new";
+  if (!box.hidden) box.querySelector("input").focus();
+});
+
+function splitName(name) {  // as MindChart does it: the last word is the last name, with any note in brackets after it
+  const [, base, note] = String(name || "").trim().replace(/\s+/g, " ").match(/^(.*?)\s*(\([^()]*\))?$/);
+  const words = base ? base.split(" ") : [""];
+  const last = words.length > 1 ? words.pop() : "";
+  return [words.join(" "), [last, note].filter(Boolean).join(" ")];
 }
 
 // --- Lists -------------------------------------------------------------------------
@@ -346,28 +418,38 @@ function recordsTable(object, rows, columns) {
     <tbody>${rows.map((row) => `<tr>${columns.map((c) => `<td class="${["fact", "detail", "name"].includes(c) ? "clip" : ""}">${cell(row, c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 }
 
-async function listView(object, search = "") {
+async function listView(object, search = "", recordType = "") {
   const spec = state.objects[object];
   if (!spec) throw new Error("Unknown page");
-  const data = await api("GET", `records/${object}?search=${encodeURIComponent(search)}`);
-  const placeholder = object === "documents" ? "Search documents, including their text…" : `Search ${spec.plural.toLowerCase()}…`;
+  const guardians = recordType === "Legal Guardian";
+  const plural = object === "patients" ? (guardians ? "Guardians" : "Patients") : spec.plural;
+  const icon = guardians ? ICONS.guardians : ICONS[object];
+  const fetchRows = async (text) => {
+    const rows = (await api("GET", `records/${object}?search=${encodeURIComponent(text)}${recordType ? `&type=${encodeURIComponent(recordType)}` : ""}`)).rows;
+    return guardians ? rows.map((r) => ({ ...r, ...JSON.parse(r.details || "{}") })) : rows;  // relationship and phone as columns
+  };
+  const columns = object !== "patients" ? undefined : guardians ? ["id", "name", "relationship", "phone", "guardian_of"]
+    : ["id", "name", "placement", "dob", "gender", "status", "guardian", "documents"];
+  const table = (rows) => recordsTable(object, rows, columns);
+  const rows = await fetchRows(search);
+  const placeholder = object === "documents" ? "Search documents, including their text…" : `Search ${plural.toLowerCase()}…`;
   $("#view").innerHTML = `
-    <div class="page-head"><span class="object-icon obj-${object}"><span class="${ICONS[object]}"></span></span>
-      <h1>${esc(spec.plural)}</h1><span class="badge plain">${data.rows.length}</span><span class="grow"></span>
-      ${object === "patients" ? '<button id="newPatient">+ New patient</button>' : ""}
+    <div class="page-head"><span class="object-icon obj-${object}"><span class="${icon}"></span></span>
+      <h1>${esc(plural)}</h1><span class="badge plain">${rows.length}</span><span class="grow"></span>
+      ${object === "patients" ? `<button id="newPatient">+ New ${guardians ? "guardian" : "patient"}</button>` : ""}
       ${object === "documents" ? '<button id="listUpload">Upload documents</button>' : ""}</div>
     <div id="newPatientForm"></div>
     <div class="list-tools"><input id="search" placeholder="${esc(placeholder)}" value="${esc(search)}"></div>
-    <div id="listBody">${data.rows.length ? recordsTable(object, data.rows) : '<p class="empty">Nothing here yet.</p>'}</div>`;
+    <div id="listBody">${rows.length ? table(rows) : '<p class="empty">Nothing here yet.</p>'}</div>`;
   let timer;
   $("#search").oninput = () => {
     clearTimeout(timer);
     timer = setTimeout(async () => {
-      const rows = (await api("GET", `records/${object}?search=${encodeURIComponent($("#search").value)}`)).rows;
-      $("#listBody").innerHTML = rows.length ? recordsTable(object, rows) : '<p class="empty">No matches.</p>';
+      const found = await fetchRows($("#search").value);
+      $("#listBody").innerHTML = found.length ? table(found) : '<p class="empty">No matches.</p>';
     }, 250);
   };
-  if (object === "patients") $("#newPatient").onclick = () => newPatientForm($("#newPatientForm"));
+  if (object === "patients") $("#newPatient").onclick = () => newPatientForm($("#newPatientForm"), guardians ? "Legal Guardian" : "Patient");
   if (object === "documents") $("#listUpload").onclick = () => pickFiles();
 }
 
@@ -386,12 +468,16 @@ function bindRecordType(form, object, values, prefix) {
   const select = typeField && form.querySelector(`[name="${typeField}"]`);
   const box = form.querySelector(".custom-fields");
   if (!select || !box) return;
+  const placement = object === "patients" ? form.querySelector('[name="placement"]') : null;  // a patient's placement picks their fields
   const render = () => {
-    const defs = recordTypeFields(object, select.value);
-    box.innerHTML = defs.length ? `<h3>${esc(select.value)} details</h3>
+    if (placement) box.querySelectorAll("[name]").forEach((el) => { values[el.name.slice(prefix.length)] = el.value; });  // keep what's typed
+    const defs = recordTypeFields(object, select.value).filter((d) => !placement || placementShows(d, placement.value, values[d.name]));
+    const heading = placement ? `${placement.value || "Placement"} details` : `${select.value} details`;
+    box.innerHTML = defs.length ? `<h3>${esc(heading)}</h3>
       <div class="fields">${defs.map((d) => fieldInput(object, d, values[d.name], prefix)).join("")}</div>` : "";
   };
   select.onchange = render;
+  placement?.addEventListener("change", render);
   render();
 }
 
@@ -418,8 +504,14 @@ function fieldInput(object, field, value, prefix = "") {
     input = `<input type="checkbox" ${name} ${value ? "checked" : ""}>`;
   } else if (field.type === "longtext") {
     input = `<textarea ${name} rows="3">${esc(value)}</textarea>`;
+  } else if (field.type === "person") {  // a legal guardian's record, or a new one
+    input = `<select ${name} data-person><option value="">None</option>
+        ${(state.guardians || []).map((g) => `<option value="${esc(g.id)}" ${g.id === value ? "selected" : ""}>${esc(g.name)}</option>`).join("")}
+        <option value="__new">＋ New guardian…</option></select>
+      <div class="new-guardian" hidden><input name="new_guardian.first_name" placeholder="Guardian's first name">
+        <input name="new_guardian.last_name" placeholder="Last name"></div>`;
   } else {
-    input = `<input ${name} value="${esc(value)}" ${field.type === "date" ? 'placeholder="MM/DD/YYYY"' : ""}>`;
+    input = `<input ${name} value="${esc(value)}" ${field.type === "date" ? "data-date" : ""}>`;
   }
   return `<div class="field ${wide}"><label>${esc(field.label)}${field.required ? " *" : ""}</label>${input}</div>`;
 }
@@ -442,12 +534,18 @@ function formValues(form) {
 
 function detailsCard(object, data, editing) {
   const spec = state.objects[object];
-  const fields = spec.fields;
   const record = data.record;
   const recordType = spec.record_type_field ? record[spec.record_type_field] : null;
+  const people = object === "patients";
+  const fields = spec.fields.filter((f) => !f.hidden && (!people || forType(f, recordType)));
   const custom = data.custom || {}, sources = data.ai_sources || {};
-  const typeDefs = recordType ? recordTypeFields(object, recordType) : [];
-  const customView = typeDefs.length ? `<h3>${esc(recordType)} details</h3><div class="fields">${typeDefs.map((d) => {
+  const typeDefs = (recordType ? recordTypeFields(object, recordType) : [])
+    .filter((d) => !people || recordType !== "Patient" || placementShows(d, record.placement, custom[d.name]));
+  const heading = people && recordType === "Patient" ? `${record.placement || "Placement"} details` : `${recordType} details`;
+  const value = (f) => f.type === "person" ? record.guardian_id : record[f.name];  // the view names the guardian's ID guardian_id
+  const shown = (f) => f.type !== "person" ? display(object, f.name, record[f.name])
+    : record.guardian_id ? recordLink(record.guardian_id, esc(record.guardian)) : display(object, "guardian", record.guardian);
+  const customView = typeDefs.length ? `<h3>${esc(heading)}</h3><div class="fields">${typeDefs.map((d) => {
       const source = sources[d.name];
       return `<div class="field ${d.type === "longtext" || d.type === "multipicklist" ? "wide" : ""}"><label>${esc(d.label)}
         ${source ? '<span class="ai-badge" title="Filled in by the AI. Check it against the quote.">✦ AI</span>' : ""}</label>
@@ -455,11 +553,14 @@ function detailsCard(object, data, editing) {
         ${source ? `<div class="ai-quote">“${esc(source.quote)}”${source.page ? ` p.${source.page}` : ""}</div>` : ""}</div>`;
     }).join("")}</div>` : "";
   const body = editing
-    ? `<form id="editForm" onsubmit="return false"><div class="fields">${fields.filter((f) => f.edit !== false).map((f) => fieldInput(object, f, record[f.name])).join("")}</div>
+    ? `<form id="editForm" onsubmit="return false">${people ? `<input type="hidden" name="record_type" value="${esc(recordType)}">` : ""}
+        <div class="fields">${fields.filter((f) => f.edit !== false && !(people && f.name === "record_type")).map((f) => fieldInput(object, f, value(f))).join("")}</div>
+        ${people && record.guardian && !record.guardian_id ? `<p class="muted small">Legal guardian was typed in before guardians had their own
+          records: “${esc(record.guardian)}”. It stays until you choose or add their record above.</p>` : ""}
         <div class="custom-fields"></div>
         <div class="actions" style="margin-top:14px"><button type="submit">Save</button><button type="button" class="secondary" id="cancelEdit">Cancel</button><span class="error"></span></div></form>`
     : `<div class="fields">${fields.map((f) => `<div class="field ${f.type === "longtext" ? "wide" : ""}"><label>${esc(f.label)}</label>
-        <div class="value">${display(object, f.name, record[f.name])}</div></div>`).join("")}
+        <div class="value">${shown(f)}</div></div>`).join("")}
         ${record.patient && object !== "patients" ? `<div class="field"><label>Patient</label><div class="value">${recordLink(record.patient_id, esc(record.patient))}</div></div>` : ""}
         ${record.document && object === "facts" ? `<div class="field"><label>Document</label><div class="value">${recordLink(record.document_id, esc(record.document))}</div></div>` : ""}
       </div>${customView}`;
@@ -471,11 +572,13 @@ async function recordView(object, uid, editing = false) {
   const data = await api("GET", `records/${object}/${encodeURIComponent(uid)}`);
   const spec = state.objects[object];
   const record = data.record;
+  const guardian = object === "patients" && record.record_type === "Legal Guardian";
+  if (editing && object === "patients") await loadGuardians();
   const title = object === "drafts" ? `History draft · ${String(record.created).replace("T", " ").slice(0, 16)}`
     : object === "facts" ? (state.sectionTitles[record.section] || "Fact") : record[spec.title_field];
   $("#view").innerHTML = `
-    <div class="page-head"><span class="object-icon obj-${object}"><span class="${ICONS[object]}"></span></span>
-      <div><div class="kicker">${esc(spec.label)}</div><h1>${esc(title)}</h1></div>
+    <div class="page-head"><span class="object-icon obj-${object}"><span class="${guardian ? ICONS.guardians : ICONS[object]}"></span></span>
+      <div><div class="kicker">${esc(object === "patients" ? record.record_type : spec.label)}</div><h1>${esc(title)}</h1></div>
       <span class="uid" title="Click to copy" id="uidChip">${esc(uid)}</span><span class="grow"></span>
       <div class="actions" id="recordActions"></div></div>
     <div id="recordBody"></div>`;
@@ -483,11 +586,12 @@ async function recordView(object, uid, editing = false) {
   if (object !== "activity") {
     $("#recordActions").insertAdjacentHTML("beforeend", `<button class="danger" id="deleteBtn">Delete</button>`);
     $("#deleteBtn").onclick = async () => {
-      const what = object === "patients" ? `${record.name} and ALL their documents, facts and drafts` : `this ${spec.label.toLowerCase()}`;
+      const what = guardian ? `${record.name}? Their patients will no longer have a legal guardian linked`
+        : object === "patients" ? `${record.name} and ALL their documents, facts and drafts` : `this ${spec.label.toLowerCase()}`;
       if (!confirm(`Permanently delete ${what}? This can't be undone.`)) return;
       await api("POST", `records/${object}/${encodeURIComponent(uid)}/delete`);
       state.dirtyDraft = false;
-      location.hash = record.patient_id && object !== "patients" ? `#/r/patients/${record.patient_id}` : `#/list/${object}`;
+      location.hash = record.patient_id && object !== "patients" ? `#/r/patients/${record.patient_id}` : `#/list/${guardian ? "guardians" : object}`;
     };
   }
 
@@ -499,7 +603,7 @@ async function recordView(object, uid, editing = false) {
     $("#cancelEdit").onclick = () => recordView(object, uid);
     $("#editForm").onsubmit = async () => {
       try {
-        await api("POST", `records/${object}/${encodeURIComponent(uid)}`, formValues($("#editForm")));
+        await api("POST", `records/${object}/${encodeURIComponent(uid)}`, await withNewGuardian(formValues($("#editForm"))));
         await recordView(object, uid);
         toast("Saved ✓");
       } catch (err) { $("#editForm .error").textContent = err.message; }
@@ -508,7 +612,7 @@ async function recordView(object, uid, editing = false) {
   } else if ($("#editBtn")) {
     $("#editBtn").onclick = async () => { await recordView(object, uid, true); animateIn($("#recordBody")); };
   }
-  if (object === "patients") patientExtras(data, body);
+  if (object === "patients") (guardian ? guardianExtras : patientExtras)(data, body);
   if (object === "documents") documentExtras(data, body);
 }
 
@@ -524,6 +628,13 @@ function factsBySection(facts, showDocument) {
         <span class="quote">“${esc(f.quote)}”${showDocument ? ` · ${recordLink(f.document_id, esc(f.document))}` : ""}${f.page ? ` p.${f.page}` : ""}
         · ${recordLink(f.id, "open")}</span></div>`).join("")}
     </details>`).join("");
+}
+
+function guardianExtras(data, body) {
+  const wards = data.related.guardian_of || [];
+  body.insertAdjacentHTML("beforeend", `<div class="card"><h2>Guardian of <span class="count">${wards.length}</span></h2>
+    ${wards.length ? recordsTable("patients", wards, ["id", "name", "placement", "dob", "status"])
+      : '<p class="empty">No patients linked yet. On a patient\'s page, click Edit and choose this guardian under Legal guardian.</p>'}</div>`);
 }
 
 function patientExtras(data, body) {
@@ -564,7 +675,7 @@ function patientExtras(data, body) {
   $("#noteBtn").onclick = () => {
     $("#noteBox").innerHTML = `<form class="card" onsubmit="return false"><h2>New note</h2>
       <div class="fields"><div class="field wide"><label>Note</label><textarea name="text" rows="4" placeholder="What happened, what was observed, what changed…"></textarea></div>
-      <div class="field"><label>Date</label><input name="date" placeholder="MM/DD/YYYY (today if blank)"></div>
+      <div class="field"><label>Date</label><input name="date" data-date placeholder="MM/DD/YYYY (today if blank)"></div>
       <div class="field"><label>Author</label><input name="author"></div></div>
       <div class="actions" style="margin-top:12px"><button type="submit">Save note</button><button type="button" class="secondary" data-cancel>Cancel</button><span class="error"></span></div></form>`;
     const form = $("#noteBox form");
@@ -587,7 +698,7 @@ function glance(data) {
   const r = data.record, custom = data.custom || {};
   const dob = parseDay(r.dob), today = new Date();
   const age = dob ? today.getFullYear() - dob.getFullYear() - (today < new Date(today.getFullYear(), dob.getMonth(), dob.getDate()) ? 1 : 0) : null;
-  const where = [r.record_type, custom.cottage || custom.program || custom.foster_home || custom.clinic].filter(Boolean).join(" · ");
+  const where = [r.placement, custom.cottage || custom.program || custom.foster_home || custom.clinic].filter(Boolean).join(" · ");
   const meds = data.related.medications.filter((m) => m.status === "Active");
   const score = data.related.measures.find((m) => m.measure !== "Vitals" && m.score !== null && m.score !== "");
   const next = data.related.follow_ups.filter((f) => f.status !== "Done").map((f) => ({ ...f, days: daysFromToday(f.due) }))
@@ -627,7 +738,99 @@ function whenLabel(days) {
   return days === 0 ? "Today" : days === 1 ? "Tomorrow" : `In ${days} days`;
 }
 
-const todayText = () => { const d = new Date(); return `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`; };
+const formatDay = (d) => `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")}/${d.getFullYear()}`;
+const todayText = () => formatDay(new Date());
+
+// --- Date boxes: type a date, or pick one from a small calendar ------------------------
+// Any input marked data-date gets a calendar button. Typed dates are tidied to MM/DD/YYYY when you leave the box
+// ("3/4/24" -> "03/04/2024"); partial dates like "2019" or "March 2019" are left as typed.
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+function tidyDate(text) {
+  const t = text.trim();
+  let m = t.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/);
+  if (m && +m[1] >= 1 && +m[1] <= 12 && +m[2] >= 1 && +m[2] <= 31) {
+    const year = m[3].length === 4 ? +m[3] : +m[3] <= new Date().getFullYear() % 100 ? 2000 + +m[3] : 1900 + +m[3];
+    return `${m[1].padStart(2, "0")}/${m[2].padStart(2, "0")}/${year}`;
+  }
+  m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  return m ? `${m[2].padStart(2, "0")}/${m[3].padStart(2, "0")}/${m[1]}` : t;
+}
+
+function enhanceDates(root = document) {
+  root.querySelectorAll("input[data-date]:not([data-date-ready])").forEach((input) => {
+    input.dataset.dateReady = "1";
+    input.autocomplete = "off";
+    if (!input.placeholder) input.placeholder = "MM/DD/YYYY";
+    const wrap = document.createElement("span");
+    wrap.className = "date-field";
+    input.replaceWith(wrap);
+    wrap.append(input);
+    wrap.insertAdjacentHTML("beforeend", '<button type="button" class="date-btn" title="Choose a date" aria-label="Choose a date"><span class="i-calendar"></span></button>');
+    wrap.querySelector(".date-btn").onclick = () => ($("#calendar")?.input === input ? closeCalendar() : openCalendar(input));
+    input.addEventListener("blur", () => {
+      const tidy = tidyDate(input.value);
+      if (tidy !== input.value) { input.value = tidy; input.dispatchEvent(new Event("change", { bubbles: true })); }
+    });
+  });
+}
+new MutationObserver(() => enhanceDates()).observe(document.body, { childList: true, subtree: true });
+
+function openCalendar(input) {
+  closeCalendar();
+  const picked = parseDay(input.value), today = new Date();
+  const shown = new Date((picked || today).getFullYear(), (picked || today).getMonth(), 1);
+  const pop = document.createElement("div");
+  pop.id = "calendar";
+  pop.input = input;
+  document.body.append(pop);
+  const same = (d, day) => d && d.getFullYear() === shown.getFullYear() && d.getMonth() === shown.getMonth() && d.getDate() === day;
+  const years = Array.from({ length: 111 }, (_, i) => today.getFullYear() + 10 - i);  // far enough back for dates of birth
+  const draw = () => {
+    const blanks = new Date(shown.getFullYear(), shown.getMonth(), 1).getDay();
+    const days = new Date(shown.getFullYear(), shown.getMonth() + 1, 0).getDate();
+    pop.innerHTML = `<div class="cal-head"><button type="button" class="cal-step" data-step="-1" aria-label="Previous month">‹</button>
+        <select data-month aria-label="Month">${MONTH_NAMES.map((n, i) => `<option value="${i}" ${i === shown.getMonth() ? "selected" : ""}>${n}</option>`).join("")}</select>
+        <select data-year aria-label="Year">${years.map((y) => `<option ${y === shown.getFullYear() ? "selected" : ""}>${y}</option>`).join("")}</select>
+        <button type="button" class="cal-step" data-step="1" aria-label="Next month">›</button></div>
+      <div class="cal-grid">${["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d) => `<span class="cal-dow">${d}</span>`).join("")}
+        ${"<span></span>".repeat(blanks)}${Array.from({ length: days }, (_, i) => i + 1).map((d) =>
+          `<button type="button" data-day="${d}" class="${same(picked, d) ? "picked" : ""} ${same(today, d) ? "today" : ""}">${d}</button>`).join("")}</div>
+      <div class="cal-foot"><button type="button" class="link small" data-today>Today</button><button type="button" class="link small" data-close>Close</button></div>`;
+  };
+  pop.onclick = (e) => {
+    const button = e.target.closest("button");
+    if (!button) return;
+    if (button.dataset.step) { shown.setMonth(shown.getMonth() + +button.dataset.step); return draw(); }
+    if (button.dataset.close !== undefined) return closeCalendar();
+    const day = button.dataset.day ? new Date(shown.getFullYear(), shown.getMonth(), +button.dataset.day) : new Date();
+    input.value = formatDay(day);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    closeCalendar();
+    input.focus();
+  };
+  pop.onchange = (e) => {
+    if (e.target.dataset.month !== undefined) shown.setMonth(+e.target.value);
+    if (e.target.dataset.year !== undefined) shown.setFullYear(+e.target.value);
+    draw();
+  };
+  draw();
+  const box = input.getBoundingClientRect();
+  pop.style.top = `${box.bottom + window.scrollY + 6}px`;
+  pop.style.left = `${Math.max(12, Math.min(box.left, innerWidth - pop.offsetWidth - 12)) + window.scrollX}px`;
+  setTimeout(() => document.addEventListener("mousedown", clickAway), 0);
+}
+
+function clickAway(e) {
+  if (!e.target.closest("#calendar, .date-btn")) closeCalendar();
+}
+
+function closeCalendar() {
+  $("#calendar")?.remove();
+  document.removeEventListener("mousedown", clickAway);
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCalendar(); });
 
 // One line in a list of things due: when, what, and (on Home) whose.
 function dueRow(item, showPatient) {
@@ -883,7 +1086,7 @@ function visitNoteForm(data) {
     <h2>Visit note for ${esc(name)} <span class="actions"><button type="button" class="link small" data-close>Close</button></span></h2>
     <p class="muted small">Write what happened in your own words, pick the mental status findings, and add your assessment and plan. The AI turns
       it into a note without adding anything; you check and edit it before saving or copying.</p>
-    <div class="fields"><div class="field"><label>Visit date</label><input name="visit_date" value="${todayText()}"></div>
+    <div class="fields"><div class="field"><label>Visit date</label><input name="visit_date" value="${todayText()}" data-date></div>
       <div class="field"><label>Visit type</label><select name="visit_type">${["Medication management", "Follow-up", "Crisis visit", "Initial visit", "Other"].map((t) => `<option>${t}</option>`).join("")}</select></div>
       <div class="field wide"><label>Since the last visit (what the youth, staff and guardian report)</label>
         <textarea name="interval" rows="3" placeholder="Sleeping better since the dose increase. Staff report one argument with a peer, no aggression. Grandmother visited Sunday."></textarea></div></div>
@@ -1089,7 +1292,7 @@ function scanNote(d) {
 // --- Settings ----------------------------------------------------------------------
 
 async function settingsView() {
-  const s = await api("GET", "settings");
+  const [s, touchId] = await Promise.all([api("GET", "settings"), api("GET", "settings/touch-id")]);
   const status = (ok, good, bad) => `<span class="${ok ? "status-ok" : "status-bad"}">${ok ? "✓ " + good : "⚠ " + bad}</span>`;
   $("#view").innerHTML = `
     <div class="page-head"><span class="object-icon obj-activity"><span class="i-settings"></span></span><h1>Settings</h1></div>
@@ -1105,9 +1308,11 @@ async function settingsView() {
           <div class="field"><label>New password again</label><input type="password" name="again" autocomplete="new-password"></div></div>
         <div class="actions" style="margin-top:12px"><button type="submit" class="small">Change password</button><span class="error"></span></div></form>
     </div>
+    <form class="card" id="touchIdForm" onsubmit="return false"><h2><span class="i-fingerprint secure-icon" style="width:20px;height:20px;vertical-align:-3px"></span> Touch ID</h2>
+      <div class="muted small">Checking this Mac…</div></form>
     <div class="card"><h2>Security</h2><div class="fields">
       <div class="field"><label>Records encrypted</label><div class="value"><span class="status-ok"><span class="i-lock secure-icon"></span>
-        AES-256, opened only by your password</span></div></div>
+        AES-256, opened ${touchId.on ? "by your password or fingerprint" : "only by your password"}</span></div></div>
       <div class="field"><label>Sent over the internet</label><div class="value"><span class="status-ok"><span class="i-lock secure-icon"></span>
         Never: records stay on this Mac</span></div></div>
       <div class="field"><label>Mac disk encryption (FileVault)</label><div class="value">${status(s.filevault, "On", "Off: turn it on in System Settings → Privacy & Security")}</div></div>
@@ -1131,6 +1336,7 @@ async function settingsView() {
     try { await api("POST", "settings/name", { name: $("#nameForm [name=name]").value }); toast("Name saved ✓"); }
     catch (err) { $("#nameForm .error").textContent = err.message; }
   };
+  touchIdCard(touchId);
   $("#passwordForm").onsubmit = async () => {
     const v = formValues($("#passwordForm"));
     if (v.new !== v.again) { $("#passwordForm .error").textContent = "The new passwords don't match."; return; }
@@ -1145,6 +1351,46 @@ async function settingsView() {
     link.click();
     URL.revokeObjectURL(link.href);
   };
+}
+
+// Touch ID: off until turned on here, and the password still works either way
+async function touchIdCard(known) {
+  const form = $("#touchIdForm");
+  const how = `<p class="muted small">Your password is kept locked by your Mac's Secure Enclave, the chip that handles Touch ID. It opens only
+    with one of your fingerprints, on this Mac. If fingerprints are added or removed, MindChart asks for your password again.</p>`;
+  const head = form.querySelector("h2").outerHTML;
+  const t = known || await api("GET", "settings/touch-id");
+  if (!t.available) {
+    form.innerHTML = `${head}<p class="muted small">This Mac doesn't have Touch ID, or no fingerprints are set up in System Settings → Touch ID &amp; Password.</p>`;
+  } else if (t.on) {
+    form.innerHTML = `${head}<p><span class="status-ok"><span class="i-lock secure-icon"></span> On:</span> MindChart opens with your fingerprint. Your password still works too.</p>
+      ${how}<div class="actions"><button type="button" class="secondary small" data-off>Turn off Touch ID</button><span class="error"></span></div>`;
+    form.querySelector("[data-off]").onclick = async () => {
+      await api("POST", "settings/touch-id", { on: false });
+      state.session.touch_id = false;
+      toast("Touch ID is off");
+      touchIdCard();
+    };
+  } else {
+    form.innerHTML = `${head}<p>Open MindChart with your fingerprint instead of typing your password.</p>${how}
+      <div style="display:flex;gap:10px;align-items:center;margin-top:10px"><input type="password" name="password" placeholder="Your MindChart password" autocomplete="current-password" style="flex:1;max-width:340px">
+        <button type="submit" class="small">Turn on Touch ID</button></div><p class="error"></p>`;
+    form.onsubmit = async () => {
+      const button = form.querySelector("[type=submit]");
+      button.disabled = true;
+      form.querySelector(".error").innerHTML = '<span class="thinking"><span class="spinner"></span>Touch the Touch ID sensor to confirm…</span>';
+      try {
+        await api("POST", "settings/touch-id", { on: true, password: form.querySelector("[name=password]").value });
+        state.session.touch_id = true;
+        toast("Touch ID is on ✓");
+        touchIdCard();
+      } catch (err) {
+        form.querySelector(".error").textContent = err.message;
+        button.disabled = false;
+      }
+      return false;
+    };
+  }
 }
 
 // --- Uploads: files wait here until their patient and type are confirmed -----------
@@ -1317,7 +1563,7 @@ function uploadCard(u) {
           ${others ? `<optgroup label="${suggested ? "Other patients" : "Patients"}">${others}</optgroup>` : ""}
           <option value="__new">+ New patient from this document</option></select>
         <div class="reason patient-reason"></div></div>
-      <div class="field"><label>Date written</label><input name="document_date" value="${esc(s.document_date)}" placeholder="MM/DD/YYYY"></div>
+      <div class="field"><label>Date written</label><input name="document_date" value="${esc(s.document_date)}" data-date></div>
       <div class="field"><label>Author</label><input name="author" value="${esc(s.author)}"></div>
     </div>
     <div class="inset new-type" hidden><h3>New document type</h3>
@@ -1327,10 +1573,11 @@ function uploadCard(u) {
       <div class="actions"><button type="button" class="small" data-add-type>Add type</button>
         <button type="button" class="secondary small" data-cancel-type>Cancel</button></div></div>
     <div class="inset new-patient" hidden><h3>New patient</h3>
-      <div class="fields"><div class="field"><label>Name *</label><input name="new_name" value="${esc(titleCase(s.child?.name))}"></div>
-        <div class="field"><label>Date of birth</label><input name="new_dob" value="${esc(s.child?.dob)}" placeholder="MM/DD/YYYY"></div>
-        <div class="field"><label>Record type</label><select name="new_record_type">
-          ${Object.keys(state.objects.patients.record_types).map((t) => `<option>${esc(t)}</option>`).join("")}</select></div></div></div>
+      <div class="fields"><div class="field"><label>First name *</label><input name="new_first" value="${esc(splitName(titleCase(s.child?.name))[0])}"></div>
+        <div class="field"><label>Last name</label><input name="new_last" value="${esc(splitName(titleCase(s.child?.name))[1])}"></div>
+        <div class="field"><label>Date of birth</label><input name="new_dob" value="${esc(s.child?.dob)}" data-date></div>
+        <div class="field"><label>Placement</label><select name="new_placement"><option value=""></option>
+          ${fieldSpec("patients", "placement").options.map((o) => `<option>${esc(o)}</option>`).join("")}</select></div></div></div>
     <div class="pull"></div>
     <details><summary class="muted small">Show the text MindChart read</summary><div class="text-preview">${esc(u.preview)}</div></details>
     <div class="actions"><button type="submit">Confirm and file</button><button type="button" class="secondary" data-discard>Discard</button>
@@ -1423,8 +1670,8 @@ function cardChoice(card) {
   if (!choice.document_type || choice.document_type === "__new") throw new Error("Choose the document's type");
   const patient = get("patient_id");
   if (patient === "__new") {
-    if (!get("new_name")) throw new Error("Enter the new patient's name");
-    choice.new_patient = { name: get("new_name"), dob: get("new_dob"), record_type: get("new_record_type") };
+    if (!get("new_first") && !get("new_last")) throw new Error("Enter the new patient's name");
+    choice.new_patient = { first_name: get("new_first"), last_name: get("new_last"), dob: get("new_dob"), placement: get("new_placement") };
   } else if (patient) {
     choice.patient_id = patient;
   } else {
@@ -1531,11 +1778,11 @@ function renderProposal(proposal) {
     fields = state.objects[proposal.object].fields.filter((f) => f.edit !== false).map((f) => fieldInput(proposal.object, f,
       proposal.fields[f.name] ?? ({ medications: { status: "Active" }, follow_ups: { status: "Open" } }[proposal.object] || {})[f.name] ?? "")).join("");
   } else if (proposal.action === "new_patient") {
-    fields = state.objects.patients.fields.filter((f) => f.edit !== false).map((f) => fieldInput("patients", f,
-      proposal.fields[f.name] || (f.name === "status" ? "Active" : f.name === "record_type" ? f.options[0] : ""))).join("");
+    fields = '<input type="hidden" name="record_type" value="Patient">' + personFields("Patient").filter((f) => f.type !== "person")
+      .map((f) => fieldInput("patients", f, proposal.fields[f.name] || (f.name === "status" ? "Active" : ""))).join("");
   } else if (proposal.action === "add_note") {
     fields = `<div class="field wide"><label>Note</label><textarea name="text" rows="4">${esc(proposal.fields.text)}</textarea></div>
-      <div class="field"><label>Date</label><input name="date" value="${esc(proposal.fields.date)}" placeholder="MM/DD/YYYY (today if blank)"></div>`;
+      <div class="field"><label>Date</label><input name="date" value="${esc(proposal.fields.date)}" data-date placeholder="MM/DD/YYYY (today if blank)"></div>`;
   } else {
     const typeDefs = Object.values(state.objects.patients.record_types || {}).flat();
     fields = Object.keys(proposal.fields).map((name) => {

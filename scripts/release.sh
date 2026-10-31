@@ -22,26 +22,29 @@ echo "$VERSION" > VERSION
 # The PDF reader and the Mac app are built here (they're compiled programs, so they aren't kept in git),
 # for macOS 12 and newer, not just this Mac's version.
 swiftc -O -target arm64-apple-macos12.0 tools/pdftext.swift -o tools/pdftext
+swiftc -O -target arm64-apple-macos12.0 tools/touchid.swift -o tools/touchid
 scripts/build_app.sh
-for program in tools/pdftext MindChart.app/Contents/MacOS/MindChart; do
+for program in tools/pdftext tools/touchid MindChart.app/Contents/MacOS/MindChart; do
   if [ "$(otool -l "$program" | awk '/minos/ { print $2; exit }')" != "12.0" ]; then
     echo "$program would only run on a newer macOS than 12, so nothing was published."
     exit 1
   fi
 done
 
-# Everything git tracks, minus files only needed for development, plus the built PDF reader.
+# Everything git tracks, minus files only needed for development, plus the built PDF reader and Touch ID helper.
 git add -A
 FILES=$(git ls-files | grep -v -e '^scripts/' -e '^tests/' -e '^\.github/' -e '^install.sh$' -e '^\.gitignore$')
 mkdir -p dist
 APP_FILES=$(find MindChart.app -type f)
-printf '%s\n' $FILES tools/pdftext $APP_FILES MANIFEST | sort > MANIFEST
+printf '%s\n' $FILES tools/pdftext tools/touchid $APP_FILES MANIFEST | sort > MANIFEST
 rm -f dist/MindChart.zip
 # shellcheck disable=SC2086
-echo "$FILES" | tr '\n' '\0' | xargs -0 zip -q dist/MindChart.zip tools/pdftext MANIFEST
+echo "$FILES" | tr '\n' '\0' | xargs -0 zip -q dist/MindChart.zip tools/pdftext tools/touchid MANIFEST
 zip -q -r dist/MindChart.zip MindChart.app
 (cd dist && shasum -a 256 MindChart.zip > MindChart.zip.sha256)
 rm MANIFEST
+# The built app is in the zip now; left here it would show up in Launchpad as a second MindChart
+rm -rf MindChart.app
 
 git commit -m "Release $VERSION
 

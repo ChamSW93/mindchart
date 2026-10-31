@@ -13,9 +13,11 @@ import fields as fieldtypes
 import history
 import vault
 
-# The patient's shared fields plus every patient record type's own fields (a proposal can set either).
-PATIENT_FIELDS = [f["name"] for f in vault.OBJECTS["patients"]["fields"] if f.get("edit", True)] + list(dict.fromkeys(
-    d["name"] for defs in fieldtypes.DEFAULT_RECORD_TYPES["patients"].values() for d in defs))
+# What the model can set for a patient: their full name (MindChart splits it into first and last), the shared fields
+# it can fill from what's said, and the Patient type's own fields. Guardians are picked on the patient's page.
+PATIENT_FIELDS = ["name"] + [f["name"] for f in vault.OBJECTS["patients"]["fields"] if f.get("edit", True) and f["name"] not in
+                             ("first_name", "last_name", "record_type", "guardian_uid")] + [
+    d["name"] for d in fieldtypes.DEFAULT_RECORD_TYPES["patients"]["Patient"]]
 
 # Medications, measures and follow-ups logged from the command bar: {intent: (object, fields the model can fill)}.
 ITEMS = {"add_medication": ("medications", ["name", "dose", "frequency", "start_date"]),
@@ -50,13 +52,13 @@ Decide what the person wants:
 - "question": they want information from the records. Write ONE SQLite SELECT statement in "sql" using only the
   views below. To filter by a patient, use their record ID from the list at the end (patient_id = 'PT-...'),
   never their name. Match other text with LIKE and % wildcards (it ignores case). Add LIMIT 200. Never change data.
-- "new_patient": they want to add a patient. Fill "patient_fields" with what they gave (name is required), including
-  "record_type" and that record type's own fields (for example "placement Cottage 4" means record_type
-  "Residential treatment" and cottage "Cottage 4").
+- "new_patient": they want to add a patient. Fill "patient_fields" with what they gave ("name", their full name, is
+  required), including "placement" and that placement's own fields (for example "placement Cottage 4" means placement
+  "Residential treatment" and cottage "Cottage 4"). Placements: {placements}. "gender" is Male, Female or X.
 - "add_note": they're giving information about a patient to record (an observation, event, medication change,
   phone call, incident). Put the patient's ID or name in "patient". Write "note_text" as a clear clinical note in
   the third person keeping every detail they gave and adding nothing. "note_date" is the date they mention, else "".
-- "update_patient": they want to change a patient's details (status, placement, guardian, admission date, etc.).
+- "update_patient": they want to change a patient's details (status, placement, admission date, etc.).
   Put the patient in "patient" and only the changed values in "patient_fields".
 - "add_medication": they want a medication on a patient's medication list ("Jordan started guanfacine 1 mg at bedtime
   today", "Add sertraline 50 mg daily to Maria's medications"). Fill "item": name, dose, frequency, start_date.
@@ -87,17 +89,23 @@ Examples (with PT-XXXXXX standing for the patient's real record ID from the list
 - "What follow-ups are open?" -> SELECT patient, patient_id, title, due, category FROM follow_ups_view WHERE status = 'Open' LIMIT 200
 - "Who has an order of protection?" -> SELECT DISTINCT patient, patient_id, fact FROM facts_view WHERE fact LIKE '%order of protection%' LIMIT 200
 - "How many active patients are there?" -> SELECT COUNT(*) AS active_patients FROM patients_view WHERE status = 'Active'
+- "Which patients are in foster care?" -> SELECT id, name, guardian FROM patients_view WHERE placement = 'Foster care' LIMIT 200
+- "Who is Sam's legal guardian, and their phone?" -> SELECT g.name, json_extract(g.details, '$.relationship') AS relationship,
+  json_extract(g.details, '$.phone') AS phone FROM guardians_view g JOIN patients_view p ON p.guardian_id = g.id WHERE p.id = 'PT-XXXXXX'
 - "Facts that aren't verified" -> SELECT patient, section, fact FROM facts_view WHERE verified = 0 LIMIT 200
 
-Record types. Patients have a record_type and documents a document_type; each record type has its own fields,
-stored as JSON in the view's "details" column. Read one with json_extract(details, '$.field_name'); yes/no fields are 1 or 0.
+People are patients (patients_view) or legal guardians (guardians_view, with "guardian_of" naming their patients).
+A patient's "guardian" is their legal guardian's name and "guardian_id" their guardian's record ID (LG-...).
+Record types. People have a record type (Patient or Legal Guardian) and documents a document_type; each has its own
+fields, stored as JSON in the view's "details" column (a patient's placement decides which of theirs apply). Read one with json_extract(details, '$.field_name'); yes/no fields are 1 or 0.
 {record_types}
 - "Which cottage is Sam in?" -> SELECT name, json_extract(details, '$.cottage') AS cottage FROM patients_view WHERE id = 'PT-XXXXXX'
 - "Court orders with an order of protection" -> SELECT patient, name, json_extract(details, '$.expires') AS expires
   FROM documents_view WHERE document_type = 'Court Order' AND json_extract(details, '$.order_of_protection') = 1 LIMIT 200
 
 Fact "section" values: {sections}
-Patient "status" values: Active, Pending, Discharged. Fact "verified" is 1 or 0.
+Patient "status" values: Active, Pending, Discharged. "placement" values: {placements}. "gender": Male, Female, X.
+Fact "verified" is 1 or 0.
 
 Patients on file (ID, name, date of birth):
 {patients}"""
@@ -107,7 +115,7 @@ def view_columns():
     with vault.connect(read_only=True) as db:
         return {
             name: [row[1] for row in db.execute(f"PRAGMA table_info({name}_view)")]
-            for name in vault.OBJECTS
+            for name in [*vault.OBJECTS, "guardians"]
         }
 
 
@@ -116,12 +124,12 @@ def build_prompt(app_name):
     patients = "\n".join(f"- {p['id']}: {p['name']}{' (DOB ' + p['dob'] + ')' if p['dob'] else ''}"
                          for p in vault.patients_for_assistant()) or "(none yet)"
     record_types = "\n".join(
-        f"- {'Patient' if obj == 'patients' else 'Document'} \"{rt}\": "
+        f"- {'Person' if obj == 'patients' else 'Document'} \"{rt}\": "
         + (", ".join(f"{d['name']} ({d['type']}{': ' + '/'.join(d['options']) if d['options'] else ''})" for d in defs) or "no own fields")
         for obj, types in vault.field_definitions().items() for rt, defs in types.items())
     return PROMPT.format(app=app_name, today=datetime.date.today().strftime("%m/%d/%Y"), views=views,
                          sections=", ".join(vault.SECTIONS), patients=patients, record_types=record_types,
-                         measures=", ".join(vault.record_type_names("measures")))
+                         measures=", ".join(vault.record_type_names("measures")), placements=", ".join(fieldtypes.PLACEMENTS))
 
 
 def find_patient(reference):
@@ -170,7 +178,10 @@ def handle(message, model, thinking, app_name):
         except Exception as error:  # let the model fix its query once
             reply = history.ask(model, thinking, system, message, SCHEMA, max_tokens=3000, history=[(
                 json.dumps(reply), f"That query failed with: {error}. Write a corrected SELECT using only the views listed.")])
-            result = vault.run_query(reply["sql"])
+            try:
+                result = vault.run_query(reply["sql"])
+            except ValueError:
+                return {"kind": "message", "text": "I couldn't work out how to look that up. Try asking it another way."}
             explanation = reply["explanation"]
         if not result["rows"] and re.search(r"(name|patient|document|fact|detail)\s*=\s*'", reply["sql"], re.I):
             # An exact text match that found nothing usually means the wording differs slightly; try once more.
@@ -186,7 +197,12 @@ def handle(message, model, thinking, app_name):
     if intent == "new_patient":
         if not fields.get("name"):
             return {"kind": "message", "text": "What's the new patient's name?"}
-        return {"kind": "proposal", "action": "new_patient", "summary": explanation, "fields": fields}
+        # First and last names, placement and gender, as MindChart keeps them, without details for other placements
+        fields = vault.person_fields(fields)
+        own = fieldtypes.PLACEMENT_FIELDS.get(fields.get("placement"))
+        others = {name for names in fieldtypes.PLACEMENT_FIELDS.values() for name in names} - set(own or [])
+        return {"kind": "proposal", "action": "new_patient", "summary": explanation,
+                "fields": {k: v for k, v in fields.items() if not (own and k in others)}}
 
     if intent in ("add_note", "update_patient", *ITEMS):
         matches = find_patient(reply["patient"])
@@ -206,6 +222,7 @@ def handle(message, model, thinking, app_name):
             return item_proposal(intent, reply, explanation, patient)
         if fields.get("name") == patient["name"]:  # the model often repeats the name; it isn't a change
             del fields["name"]
+        fields = vault.person_fields(fields)
         if not fields:
             return {"kind": "message", "text": "What should change for " + patient["name"] + "?"}
         return {"kind": "proposal", "action": "update_patient", "summary": explanation, "patient": patient, "fields": fields}
@@ -231,7 +248,8 @@ def confirm(proposal):
     action, fields = proposal["action"], proposal["fields"]
     if action == "new_patient":
         uid = vault.create_record("patients", fields)
-        return {"kind": "done", "object": "patients", "id": uid, "text": f"Added {fields.get('name')} ({uid})."}
+        name = fieldtypes.full_name(fields.get("first_name"), fields.get("last_name")) or fields.get("name")
+        return {"kind": "done", "object": "patients", "id": uid, "text": f"Added {name} ({uid})."}
     patient_uid = proposal["patient"]["id"]
     if action == "add_note":
         uid = vault.add_note(patient_uid, fields.get("text", ""), fields.get("date", ""))

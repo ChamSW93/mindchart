@@ -41,6 +41,11 @@ class Assistant(unittest.TestCase):
         self.replies = [{"intent": "unclear", "sql": "SELECT COUNT(*) FROM patients_view", "explanation": "Count."}]
         self.assertEqual(assistant.handle("How many?", "m", False, "MindChart")["kind"], "answer")
 
+    def test_two_bad_queries_get_a_message_not_an_error(self):
+        two = "SELECT name FROM patients_view; SELECT name FROM guardians_view"  # what bonsai-2:9b once wrote
+        self.replies = [{"intent": "question", "sql": two}, {"intent": "question", "sql": two}]
+        self.assertIn("another way", assistant.handle("Who is in foster care?", "m", False, "MindChart")["text"])
+
     def test_broken_query_gets_one_retry(self):
         self.replies = [{"intent": "question", "sql": "SELECT nonsense FROM nowhere"},
                         {"intent": "question", "sql": "SELECT COUNT(*) FROM patients_view", "explanation": "Fixed."}]
@@ -48,8 +53,9 @@ class Assistant(unittest.TestCase):
 
     def test_writes_are_never_run_from_a_question(self):
         self.replies = [{"intent": "question", "sql": "DELETE FROM patients"}, {"intent": "question", "sql": "DELETE FROM patients"}]
-        with self.assertRaises(ValueError):
-            assistant.handle("Delete everyone", "m", False, "MindChart")
+        before = len(self.vault.list_records("patients")["rows"])
+        self.assertIn("another way", assistant.handle("Delete everyone", "m", False, "MindChart")["text"])
+        self.assertEqual(len(self.vault.list_records("patients")["rows"]), before)  # nothing was deleted
         self.assertTrue(self.vault.get_record("patients", self.patient))
 
     def test_note_is_proposed_not_saved(self):
@@ -72,11 +78,17 @@ class Assistant(unittest.TestCase):
     def test_new_patient_with_record_type_fields(self):
         self.replies = [{"intent": "new_patient", "explanation": "New patient.", "patient_fields": {
             **{f: "" for f in assistant.PATIENT_FIELDS}, "name": "Maria Test (fictional)",
-            "record_type": "Residential treatment", "cottage": "Cottage 4"}}]
+            "record_type": "Residential treatment", "cottage": "Cottage 4", "program": "Other"}}]
         proposal = assistant.handle("New patient Maria, Cottage 4", "m", False, "MindChart")
         self.assertEqual(proposal["fields"]["cottage"], "Cottage 4")
-        done = assistant.confirm(proposal)
+        self.assertNotIn("program", proposal["fields"])  # a Crisis / stabilization detail, not for residential treatment
+        # Shown as first and last name and a placement, the way the form asks for them
+        self.assertEqual((proposal["fields"]["first_name"], proposal["fields"]["last_name"]), ("Maria", "Test (fictional)"))
+        self.assertEqual((proposal["fields"]["record_type"], proposal["fields"]["placement"]), ("Patient", "Residential treatment"))
+        done = assistant.confirm({**proposal, "fields": {k: v for k, v in proposal["fields"].items() if k != "name"}})  # as the form sends it
         self.assertEqual(self.vault.get_record("patients", done["id"])["custom"]["cottage"], "Cottage 4")
+        self.assertIn("Added Maria Test (fictional)", done["text"])
+        self.assertIn("name", assistant.SCHEMA["properties"]["patient_fields"]["properties"])  # the model can give the name
 
     def test_scores_medications_and_follow_ups_can_be_logged(self):
         item = lambda **values: {**{f: "" for f in assistant.ITEM_FIELDS}, **values}

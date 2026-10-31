@@ -52,6 +52,7 @@ a:hover { text-decoration: underline; }
 .i-drafts { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.7' stroke-linejoin='round'%3E%3Cpath d='M12.5 3.5 16.5 7.5 8 16H4v-4z'/%3E%3Cpath d='m10.5 5.5 4 4'/%3E%3C/svg%3E"); }
 .i-activity { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round'%3E%3Ccircle cx='10' cy='10' r='7'/%3E%3Cpath d='M10 6v4l2.5 2.5'/%3E%3C/svg%3E"); }
 .i-settings { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6'%3E%3Ccircle cx='10' cy='10' r='2.6'/%3E%3Cpath d='M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.6 1.6M13.7 13.7l1.6 1.6M4.7 15.3l1.6-1.6M13.7 6.3l1.6-1.6'/%3E%3C/svg%3E"); }
+.i-fingerprint { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round'%3E%3Cpath d='M5.2 5.6A6.3 6.3 0 0 1 16.3 9.5v1.2M3.7 9.5c0-.9.2-1.8.5-2.6M3.9 12.6c.2.8.5 1.6.9 2.3M6.8 16.6a9 9 0 0 1-1.4-4.6V9.6a4.6 4.6 0 0 1 9.2 0v1.6c0 1.4-.2 2.7-.6 4M8.9 17.4a12 12 0 0 1-1.6-5.8V9.7a2.7 2.7 0 0 1 5.4 0v1.6c0 2-.4 3.9-1.1 5.6M10 9.8v1.8c0 1.8-.3 3.6-.9 5.2'/%3E%3C/svg%3E"); }
 .i-lock { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.7'%3E%3Crect x='4' y='9' width='12' height='8' rx='2'/%3E%3Cpath d='M7 9V6.5a3 3 0 0 1 6 0V9'/%3E%3C/svg%3E"); }
 .i-spark { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M10 2.5c.6 3.6 1.9 4.9 5.5 5.5-3.6.6-4.9 1.9-5.5 5.5-.6-3.6-1.9-4.9-5.5-5.5 3.6-.6 4.9-1.9 5.5-5.5Z'/%3E%3Cpath d='M15.5 13c.3 1.6.9 2.2 2.5 2.5-1.6.3-2.2.9-2.5 2.5-.3-1.6-.9-2.2-2.5-2.5 1.6-.3 2.2-.9 2.5-2.5Z'/%3E%3C/svg%3E"); }
 
@@ -65,6 +66,8 @@ a:hover { text-decoration: underline; }
 .signin-card p { margin: 0 0 6px; }
 .signin-card .fine { font-size: 12.5px; color: var(--muted); }
 .signin-card input { text-align: center; font-size: 16px; padding: 11px 14px; }
+.touch-id-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.touch-id-btn .i-fingerprint { width: 20px; height: 20px; }
 
 /* Layout */
 #app { display: grid; grid-template-columns: 236px 1fr; min-height: 100%; }
@@ -472,3 +475,32 @@ details.past summary { cursor: pointer; margin-bottom: 8px; }
 .glance-item > span { font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
 .glance-item b { font: 500 15.5px/1.3 var(--serif); overflow-wrap: anywhere; }
 .glance-item small { font-size: 12.5px; color: var(--muted); }
+
+/* People: legal guardians */
+.i-guardian { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='7.5' cy='6' r='2.8'/%3E%3Cpath d='M2.5 16.5c.6-3 2.5-4.6 5-4.6 1.3 0 2.4.4 3.2 1.2'/%3E%3Cpath d='M14.5 9.5l3 1.1v2.3c0 2-1.3 3.3-3 3.9-1.7-.6-3-1.9-3-3.9v-2.3z'/%3E%3C/svg%3E"); }
+.new-guardian { display: flex; gap: 8px; margin-top: 8px; }
+.new-guardian input { flex: 1; min-width: 0; }
+
+/* Date boxes: typed, or picked from the calendar */
+.i-calendar { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round'%3E%3Crect x='3' y='4.5' width='14' height='12.5' rx='2'/%3E%3Cpath d='M3 8.5h14M7 2.8v3.4M13 2.8v3.4'/%3E%3Ccircle cx='7' cy='12' r='.6' fill='black'/%3E%3Ccircle cx='10' cy='12' r='.6' fill='black'/%3E%3Ccircle cx='13' cy='12' r='.6' fill='black'/%3E%3C/svg%3E"); }
+.date-field { position: relative; display: block; }
+.date-field input { width: 100%; padding-right: 38px; }
+.date-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); background: none; border: 0; padding: 5px 7px;
+  color: var(--muted); border-radius: 8px; box-shadow: none; min-height: 0; }
+.date-btn:hover { color: var(--accent); background: var(--accent-soft); }
+.date-btn .i-calendar { width: 17px; height: 17px; display: block; }
+#calendar { position: absolute; z-index: 50; width: 268px; background: var(--panel); border: 1px solid var(--border-strong);
+  border-radius: 14px; box-shadow: var(--shadow), 0 12px 32px rgba(0, 0, 0, .18); padding: 10px; font-size: 13px; }
+#calendar .cal-head { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+#calendar .cal-head select { flex: 1; min-width: 0; padding: 4px 6px; font-size: 13px; }
+#calendar .cal-step { background: none; border: 0; color: var(--text); font-size: 18px; line-height: 1; padding: 4px 8px;
+  border-radius: 8px; box-shadow: none; min-height: 0; }
+#calendar .cal-step:hover { background: var(--panel-2); }
+#calendar .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; text-align: center; }
+#calendar .cal-dow { color: var(--muted); font-size: 11px; padding: 4px 0; }
+#calendar .cal-grid button { background: none; border: 0; color: var(--text); padding: 6px 0; border-radius: 8px; font: inherit;
+  box-shadow: none; min-height: 0; }
+#calendar .cal-grid button:hover { background: var(--panel-2); }
+#calendar .cal-grid button.today { color: var(--accent); font-weight: 600; box-shadow: inset 0 0 0 1px var(--accent); }
+#calendar .cal-grid button.picked { background: var(--accent); color: var(--on-accent); }
+#calendar .cal-foot { display: flex; justify-content: space-between; margin-top: 8px; }

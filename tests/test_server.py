@@ -45,6 +45,47 @@ class Server(unittest.TestCase):
         self.assertEqual(self.request("POST", "/api/session/unlock", {"password": support.PASSWORD})[0], 200)
         self.assertEqual(self.request("GET", "/api/records/patients")[0], 200)
 
+    def test_touch_id_signs_in_with_the_sealed_password(self):
+        undo = support.fake_touch_id()
+        try:
+            support.unlocked_vault()
+            status, body = self.request("POST", "/api/settings/touch-id", {"on": True, "password": "not-the-password"})
+            self.assertEqual((status, body["error"]), (400, "That password isn't right"))
+            self.assertEqual(self.request("POST", "/api/settings/touch-id", {"on": True, "password": support.PASSWORD})[1], {"on": True})
+            support.vault.lock()
+            self.assertTrue(self.request("GET", "/api/session")[1]["touch_id"])
+            self.assertTrue(self.request("POST", "/api/session/touch-id", {})[1]["unlocked"])
+            self.assertEqual(support.vault.list_records("activity")["rows"][0]["action"], "signed in with Touch ID")
+            # A changed password keeps Touch ID working
+            self.request("POST", "/api/settings/password", {"current": support.PASSWORD, "new": "another-password-1"})
+            support.vault.lock()
+            self.assertTrue(self.request("POST", "/api/session/touch-id", {})[1]["unlocked"])
+            self.request("POST", "/api/settings/password", {"current": "another-password-1", "new": support.PASSWORD})
+            # If the sealed password stops working (changed some other way), Touch ID turns itself off
+            import touchid
+            touchid.turn_on("an-old-password-1")
+            support.vault.lock()
+            status, body = self.request("POST", "/api/session/touch-id", {})
+            self.assertEqual(status, 400)
+            self.assertIn("turned off", body["error"])
+            self.assertFalse(self.request("GET", "/api/session")[1]["touch_id"])
+        finally:
+            undo()
+            support.vault._failed_attempts = 0
+            support.unlocked_vault()
+
+    def test_guardians_are_listed_apart_from_patients(self):
+        support.unlocked_vault()
+        guardian = self.request("POST", "/api/records/patients", {"record_type": "Legal Guardian", "first_name": "Server",
+                                                                   "last_name": "Guardian (fictional)"})[1]["id"]
+        self.assertTrue(guardian.startswith("LG-"))
+        listed = self.request("GET", "/api/records/patients?type=Legal%20Guardian")[1]["rows"]
+        self.assertIn(guardian, [r["id"] for r in listed])
+        self.assertNotIn(guardian, [r["id"] for r in self.request("GET", "/api/records/patients")[1]["rows"]])
+        self.assertEqual(self.request("GET", f"/api/records/patients/{guardian}")[1]["record"]["record_type"], "Legal Guardian")
+        fields = self.request("GET", "/api/objects")[1]["objects"]["patients"]["fields"]
+        self.assertEqual(next(f for f in fields if f["name"] == "gender")["options"], ["Male", "Female", "X"])
+
     def test_record_routes(self):
         support.unlocked_vault()
         status, created = self.request("POST", "/api/records/patients", {"name": "Server Test (fictional)"})

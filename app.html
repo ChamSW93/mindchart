@@ -18,8 +18,9 @@
       <input type="password" id="password" autocomplete="current-password" placeholder="Password">
       <input type="password" id="password2" autocomplete="new-password" placeholder="Type it again" hidden>
       <button id="signinBtn" type="submit"></button>
+      <button id="touchIdBtn" type="button" class="secondary touch-id-btn" hidden><span class="i-fingerprint"></span> Use Touch ID</button>
       <p class="error" id="signinError"></p>
-      <p class="secure-note"><span class="i-lock secure-icon"></span> Your records are encrypted on this Mac. Only your password opens them.</p>
+      <p class="secure-note"><span class="i-lock secure-icon"></span> <span id="signinSecure">Your records are encrypted on this Mac. Only your password opens them.</span></p>
       <p class="fine" id="signinFine"></p>
     </form>
   </div>

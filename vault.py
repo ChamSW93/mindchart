@@ -4,7 +4,8 @@ Everything MindChart saves lives in an AES-256 encrypted disk image that opens o
 the password chosen the first time MindChart starts. While it's unlocked it appears as a
 hidden drive that only MindChart uses; when it's locked (Lock button, 15 minutes of
 inactivity, closing the app, or restarting the computer) the data can't be read without
-the password. The password itself is never stored.
+the password. The password itself is never stored, unless Touch ID is turned on (touchid.py), which keeps
+it sealed by a key in the Mac's Secure Enclave that only works after a fingerprint.
 
 The data is organized as objects, like a CRM. Each record has its own ID with a prefix
 for its type (PT-7K3M9Q is a patient), and each type has its own fields, defined once in
@@ -33,6 +34,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -49,7 +51,7 @@ MOUNT = HOME / ".unlocked"
 DATABASE = MOUNT / "records.db"
 AUTO_LOCK_MINUTES = 15
 MIN_PASSWORD_LENGTH = 10
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 BACKUPS_KEPT = 5
 MAX_ATTEMPTS = 5  # wrong passwords allowed before MindChart makes you wait
 
@@ -88,17 +90,27 @@ DOCUMENT_TYPES_BEFORE_V3 = ["Psychiatric Evaluation", "Psychological Evaluation"
 
 # Every object type and its fields. "edit": False fields are filled in by MindChart, not people.
 OBJECTS = {
+    # People: patients and their legal guardians, told apart by record type. (The table keeps its first name,
+    # "patients", so everything that links to a patient still does.) "for" limits a field to some record types.
     "patients": {
-        "label": "Patient", "plural": "Patients", "prefix": "PT", "title_field": "name",
+        "label": "Person", "plural": "People", "prefix": "PT", "title_field": "name",
+        "prefixes": {"Legal Guardian": "LG"},  # PT-... for patients, LG-... for legal guardians
         "fields": [
-            {"name": "name", "label": "Name", "type": "text", "required": True},
-            {"name": "dob", "label": "Date of birth", "type": "date"},
-            {"name": "gender", "label": "Gender", "type": "text"},
-            {"name": "mrn", "label": "MRN / ID", "type": "text"},
+            {"name": "first_name", "label": "First name", "type": "text"},
+            {"name": "last_name", "label": "Last name", "type": "text"},
+            {"name": "name", "label": "Name", "type": "text", "edit": False, "hidden": True},  # first and last, kept in step
             {"name": "record_type", "label": "Record type", "type": "picklist",
              "options": list(fieldtypes.DEFAULT_RECORD_TYPES["patients"])},
-            {"name": "status", "label": "Status", "type": "picklist", "options": ["Active", "Pending", "Discharged"]},
-            {"name": "guardian", "label": "Legal guardian", "type": "text"},
+            {"name": "dob", "label": "Date of birth", "type": "date", "for": ["Patient"]},
+            {"name": "gender", "label": "Gender", "type": "picklist", "options": fieldtypes.GENDERS, "for": ["Patient"]},
+            {"name": "mrn", "label": "MRN / ID", "type": "text", "for": ["Patient"]},
+            {"name": "status", "label": "Status", "type": "picklist", "options": ["Active", "Pending", "Discharged"],
+             "for": ["Patient"]},
+            {"name": "placement", "label": "Placement", "type": "picklist", "options": fieldtypes.PLACEMENTS, "for": ["Patient"]},
+            {"name": "guardian_uid", "label": "Legal guardian", "type": "person", "record_type": "Legal Guardian",
+             "for": ["Patient"]},
+            # The guardian's name, kept in step with the guardian's record (or, from before guardians were records, as typed)
+            {"name": "guardian", "label": "Legal guardian", "type": "text", "edit": False, "hidden": True},
             {"name": "notes", "label": "Notes", "type": "longtext"},
             {"name": "created", "label": "Created", "type": "datetime", "edit": False},
         ],
@@ -213,14 +225,22 @@ def table_sql(name):
 
 # Views with patient and document details joined in, used by lists, search and the assistant.
 VIEWS = """
-DROP VIEW IF EXISTS patients_view; DROP VIEW IF EXISTS documents_view; DROP VIEW IF EXISTS facts_view;
+DROP VIEW IF EXISTS people_view; DROP VIEW IF EXISTS patients_view; DROP VIEW IF EXISTS guardians_view;
+DROP VIEW IF EXISTS documents_view; DROP VIEW IF EXISTS facts_view;
 DROP VIEW IF EXISTS drafts_view; DROP VIEW IF EXISTS activity_view; DROP VIEW IF EXISTS medications_view;
 DROP VIEW IF EXISTS measures_view; DROP VIEW IF EXISTS follow_ups_view;
-CREATE VIEW patients_view AS
-    SELECT p.uid AS id, p.name, p.record_type, p.dob, p.gender, p.mrn, p.status, p.guardian, p.notes, p.created,
+CREATE VIEW people_view AS
+    SELECT p.uid AS id, p.name, p.first_name, p.last_name, p.record_type, p.dob, p.gender, p.mrn, p.status, p.placement,
+           p.guardian_uid AS guardian_id, COALESCE(g.name, p.guardian) AS guardian, p.notes, p.created,
            (SELECT COUNT(*) FROM documents d WHERE d.patient_id = p.id) AS documents,
            p.custom AS details  -- the record type's own fields, as JSON
-    FROM patients p;
+    FROM patients p LEFT JOIN patients g ON g.uid = p.guardian_uid;
+CREATE VIEW patients_view AS SELECT * FROM people_view WHERE record_type = 'Patient';
+CREATE VIEW guardians_view AS
+    SELECT g.uid AS id, g.name, g.first_name, g.last_name, g.notes, g.created,
+           (SELECT group_concat(p.name, ', ') FROM patients p WHERE p.guardian_uid = g.uid) AS guardian_of,
+           g.custom AS details
+    FROM patients g WHERE g.record_type = 'Legal Guardian';
 CREATE VIEW documents_view AS
     SELECT d.uid AS id, p.uid AS patient_id, p.name AS patient, d.name, d.kind, d.document_type, d.document_date,
            d.author, d.added, d.read_by_model, (SELECT COUNT(*) FROM facts f WHERE f.document_id = d.id) AS facts,
@@ -296,7 +316,8 @@ _failed_attempts = 0
 _wait_until = 0.0
 
 
-def unlock(password):
+def unlock(password, method=""):
+    """Open the store. method: how the password was given, for the activity log (e.g. "Touch ID")."""
     global _failed_attempts, _wait_until
     with _lock:
         if is_unlocked():
@@ -323,7 +344,8 @@ def unlock(password):
             raise
         touch()
         failures, _failed_attempts = _failed_attempts, 0
-    log("signed in" + (f" after {failures} wrong password attempt{'s' if failures > 1 else ''}" if failures else ""))
+    log("signed in" + (f" with {method}" if method else "") +
+        (f" after {failures} wrong password attempt{'s' if failures > 1 else ''}" if failures else ""))
 
 
 def prepare_database(db):
@@ -412,8 +434,9 @@ def connect(read_only=False):
 
 def insert(db, name, values):
     """Add a record with a fresh ID; returns (internal id, record ID)."""
+    prefix = OBJECTS[name].get("prefixes", {}).get(values.get("record_type"), OBJECTS[name]["prefix"])
     for _ in range(10):
-        uid = new_uid(OBJECTS[name]["prefix"])
+        uid = new_uid(prefix)
         try:
             columns = ["uid", *values]
             cursor = db.execute(f"INSERT INTO {name} ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
@@ -513,18 +536,24 @@ def set_setting(key, value):
                    (key, value))
 
 
+def check_password(password, wrong="That password isn't right"):
+    """Make sure the password is right, while the store is open (before changing it, or turning on Touch ID)."""
+    if not is_unlocked():
+        raise PermissionError("MindChart is locked")
+    # macOS only changes a password while the data is closed, but it does check the password while open.
+    # Changing it to itself, it reports a wrong one as an authentication failure and changes nothing.
+    chpass = ["hdiutil", "chpass", "-oldstdinpass", "-newstdinpass", str(IMAGE)]
+    if b"Authentication" in subprocess.run(chpass, input=f"{password}\0{password}".encode(), capture_output=True).stderr:
+        raise ValueError(wrong)
+
+
 def change_password(current, new):
     """Change the password that encrypts MindChart's data."""
     if len(new) < MIN_PASSWORD_LENGTH:
         raise ValueError(f"Use a new password of at least {MIN_PASSWORD_LENGTH} characters")
-    if not is_unlocked():
-        raise PermissionError("MindChart is locked")
+    check_password(current, "Your current password isn't right")  # so a typo doesn't lock anyone out
     passwords = f"{current}\0{new}".encode()
     chpass = ["hdiutil", "chpass", "-oldstdinpass", "-newstdinpass", str(IMAGE)]
-    # macOS only changes the password while the data is closed, but it does check the current password
-    # while open, so check that first: a typo then doesn't lock anyone out.
-    if b"Authentication" in subprocess.run(chpass, input=passwords, capture_output=True).stderr:
-        raise ValueError("Your current password isn't right")
     log("changed the password")
     lock("locked to change the password")
     result = subprocess.run(chpass, input=passwords, capture_output=True)
@@ -569,6 +598,7 @@ def describe_objects():
         described[name]["fields"] = [{**f, "options": list(record_types)} if f["name"] == type_field else f
                                      for f in OBJECTS[name]["fields"]]
     described["measures"].update(bands=fieldtypes.MEASURE_BANDS, max=fieldtypes.MEASURE_MAX)
+    described["patients"]["placement_fields"] = fieldtypes.PLACEMENT_FIELDS  # which of a patient's own fields each placement uses
     return described
 
 
@@ -716,9 +746,10 @@ def document_field_definitions():
     return {rt: [d for d in defs if d["ai"]] for rt, defs in field_definitions()["documents"].items()}
 
 
-def list_records(name, search="", patient_uid=None, limit=1000):
-    """A list view: newest first, optionally filtered by text in any column or by patient."""
-    view = f"{name}_view"
+def list_records(name, search="", patient_uid=None, limit=1000, record_type=None):
+    """A list view: newest first, optionally filtered by text in any column or by patient.
+    People are listed as patients, unless record_type asks for legal guardians."""
+    view = "guardians_view" if name == "patients" and record_type == "Legal Guardian" else f"{name}_view"
     with connect() as db:
         columns = [row[1] for row in db.execute(f"PRAGMA table_info({view})")]
         where, args = [], []
@@ -750,13 +781,18 @@ def list_records(name, search="", patient_uid=None, limit=1000):
 def get_record(name, uid):
     """One record with its fields and related lists (a patient's documents, facts, drafts and activity)."""
     with connect() as db:
-        row = db.execute(f"SELECT * FROM {name}_view WHERE id = ?", (uid,)).fetchone()
+        row = db.execute(f"SELECT * FROM {'people' if name == 'patients' else name}_view WHERE id = ?", (uid,)).fetchone()
     if not row:
         raise ValueError(f"No {OBJECTS[name]['label'].lower()} with ID {uid}")
     record = {"object": name, "record": dict(row), "related": {}}
     if name in fieldtypes.RECORD_TYPE_FIELD:
         record["custom"], record["ai_sources"] = custom_values(row["details"])
-    if name == "patients":
+    if name == "patients" and row["record_type"] == "Legal Guardian":
+        with connect() as db:
+            record["related"]["guardian_of"] = [dict(r) for r in db.execute(
+                "SELECT id, name, placement, dob, status FROM patients_view WHERE guardian_id = ? ORDER BY name", (uid,))]
+        log("opened legal guardian", None, uid)
+    elif name == "patients":
         for child in ("documents", "facts", "drafts", "activity", "medications", "measures", "follow_ups"):
             record["related"][child] = list_records(child, patient_uid=uid, limit=500)["rows"]
         log("opened patient", internal(name, uid))
@@ -786,16 +822,60 @@ def internal_patient(name, uid):
 CREATED_BY_HAND = ("patients", "medications", "measures", "follow_ups")
 
 
+def person_fields(fields):
+    """A person's incoming fields, tidied: a full name becomes first and last names, a placement given as the record
+    type (how patients were typed before guardians had records) becomes the placement, and gender is written one way."""
+    fields = dict(fields)
+    if fields.get("record_type") in fieldtypes.PLACEMENTS:
+        fields["placement"] = fields.get("placement") or fields["record_type"]
+        fields["record_type"] = "Patient"
+    if "gender" in fields:
+        fields["gender"] = fieldtypes.normalize_gender(fields["gender"])
+    if fields.get("name") and not (fields.get("first_name") or fields.get("last_name")):
+        fields["first_name"], fields["last_name"] = fieldtypes.split_name(fields["name"])
+    return fields
+
+
+def person_values(db, values, current=None):
+    """Work out a person's full name from first and last, and their guardian's name from the guardian's record."""
+    if current is None or "first_name" in values or "last_name" in values:
+        first = values.get("first_name", (current or {}).get("first_name"))
+        last = values.get("last_name", (current or {}).get("last_name"))
+        values["name"] = fieldtypes.full_name(first, last)
+        if not values["name"]:
+            raise ValueError("Enter a first or last name")
+    # Only a change of guardian touches the name kept with the patient, so a guardian typed in before guardians had
+    # records stays until someone picks the guardian's record
+    if "guardian_uid" in values and (current is None or values["guardian_uid"] != (current.get("guardian_uid") or "")):
+        if values["guardian_uid"]:
+            row = db.execute("SELECT name, record_type FROM patients WHERE uid = ?", (values["guardian_uid"],)).fetchone()
+            if not row or row["record_type"] != "Legal Guardian":
+                raise ValueError("Choose the legal guardian from the list")
+            values["guardian"] = row["name"]
+        else:
+            values["guardian"] = ""
+
+
+def person_label(record_type):
+    return (record_type or "patient").lower()
+
+
 def create_record(name, fields, parent_uid=None):
     """Create a patient, or a medication, measure or follow-up for the patient parent_uid. Returns the new record ID.
     (Documents come in through uploads and notes, and facts and drafts are made by MindChart.)"""
     if name not in CREATED_BY_HAND:
         raise ValueError(f"New {OBJECTS[name]['plural'].lower()} are added from a patient's page")
+    if name == "patients":
+        fields = person_fields(fields)
     values = clean_fields(name, fields, creating=True)
-    defaults = {"patients": {"status": "Active", "record_type": list(fieldtypes.DEFAULT_RECORD_TYPES["patients"])[0]},
-                "medications": {"status": "Active"}, "follow_ups": {"status": "Open"}}.get(name, {})
+    defaults = {"patients": {"record_type": "Patient"}, "medications": {"status": "Active"},
+                "follow_ups": {"status": "Open"}}.get(name, {})
     values.update({k: v for k, v in defaults.items() if not values.get(k)})
     if name == "patients":
+        if values["record_type"] == "Patient" and not values.get("status"):
+            values["status"] = "Active"
+        with connect() as db:
+            person_values(db, values)
         values["created"] = now()
     if name == "measures":
         check_measure(values, fields)
@@ -814,7 +894,8 @@ def create_record(name, fields, parent_uid=None):
         row_id, uid = insert(db, name, values)
         patient_id = row_id if name == "patients" else values["patient_id"]
     title = values.get(OBJECTS[name]["title_field"]) or ""
-    log(f"created {OBJECTS[name]['label'].lower()}", patient_id, uid if name == "patients" else f"{uid}: {title}")
+    label = person_label(values["record_type"]) if name == "patients" else OBJECTS[name]["label"].lower()
+    log(f"created {label}", patient_id, uid if name == "patients" else f"{uid}: {title}")
     return uid
 
 
@@ -843,11 +924,17 @@ def check_measure(values, fields):
 
 def update_record(name, uid, fields):
     """Save edited fields. Only values that actually changed are saved and logged."""
+    if name == "patients":
+        fields = person_fields(fields)
     values = clean_fields(name, fields)
     custom_changes = {}
     with connect() as db:
         row_id = internal_id(db, name, uid)
         current = dict(db.execute(f"SELECT * FROM {name} WHERE id = ?", (row_id,)).fetchone())
+        if name == "patients":
+            if values.get("guardian_uid") == uid:
+                raise ValueError("Someone can't be their own legal guardian")
+            person_values(db, values, current)
     if name in fieldtypes.RECORD_TYPE_FIELD:
         record_type = values.get(fieldtypes.RECORD_TYPE_FIELD[name]) or current[fieldtypes.RECORD_TYPE_FIELD[name]]
         incoming = {**{k: v for k, v in fields.items() if k not in values and k != "custom"}, **(fields.get("custom") or {})}
@@ -868,6 +955,8 @@ def update_record(name, uid, fields):
         if name == "facts":
             values["edited"] = now()
         db.execute(f"UPDATE {name} SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?", (*values.values(), row_id))
+        if name == "patients" and "name" in values:  # a guardian's new name shows on their patients' records too
+            db.execute("UPDATE patients SET guardian = ? WHERE guardian_uid = ?", (values["name"], uid))
         patient_id = patient_of(db, name, row_id)
         if name == "documents" and values.get("document_type"):
             learn_type(db, row_id, values["document_type"])  # a correction teaches MindChart too
@@ -881,7 +970,8 @@ def update_record(name, uid, fields):
     changed = "; ".join([f"{labels[k]}: {short(current.get(k))} → {short(v)}" for k, v in values.items()
                          if k not in ("edited", "custom")] +
                         [f"{labels[k]}: {short(old)} → {short(new)}" for k, (old, new) in custom_changes.items()])
-    log(f"edited {OBJECTS[name]['label'].lower()}", patient_id, f"{uid}: {changed}")
+    label = person_label(values.get("record_type") or current["record_type"]) if name == "patients" else OBJECTS[name]["label"].lower()
+    log(f"edited {label}", patient_id, f"{uid}: {changed}")
 
 
 def delete_record(name, uid):
@@ -891,9 +981,13 @@ def delete_record(name, uid):
         row_id = internal_id(db, name, uid)
         patient_id = patient_of(db, name, row_id)
         title = db.execute(f"SELECT {OBJECTS[name]['title_field']} FROM {name} WHERE id = ?", (row_id,)).fetchone()[0]
+        label = OBJECTS[name]["label"].lower()
+        if name == "patients":
+            label = person_label(db.execute("SELECT record_type FROM patients WHERE id = ?", (row_id,)).fetchone()[0])
+            db.execute("UPDATE patients SET guardian_uid = NULL, guardian = '' WHERE guardian_uid = ?", (uid,))
         db.execute(f"DELETE FROM {name} WHERE id = ?", (row_id,))
     # A deleted patient's own ID can't be linked any more, so their name goes in the detail.
-    log(f"deleted {OBJECTS[name]['label'].lower()}", None if name == "patients" else patient_id, f"{uid}: {title}")
+    log(f"deleted {label}", None if name == "patients" else patient_id, f"{uid}: {title}")
     if name in ("patients", "documents"):
         with connect() as db:
             db.execute("VACUUM")  # rewrite the database so deleted records don't linger in free space
@@ -901,7 +995,7 @@ def delete_record(name, uid):
 
 def patients_for_assistant():
     with connect() as db:
-        return [dict(r) for r in db.execute("SELECT uid AS id, name, dob FROM patients ORDER BY name")]
+        return [dict(r) for r in db.execute("SELECT uid AS id, name, dob FROM patients WHERE record_type = 'Patient' ORDER BY name")]
 
 
 # --- Documents, notes and history building ---------------------------------------
@@ -1049,7 +1143,7 @@ def type_examples():
 
 def patients_for_matching():
     with connect() as db:
-        return [dict(r) for r in db.execute("SELECT uid AS id, name, dob, mrn, guardian FROM patients ORDER BY name")]
+        return [dict(r) for r in db.execute("SELECT id, name, dob, mrn, guardian FROM patients_view ORDER BY name")]
 
 
 def next_document_to_read():
@@ -1082,7 +1176,7 @@ def onboarding():
     with connect() as db:
         count = lambda sql, *args: db.execute(sql, args).fetchone()[0]
         did = lambda action: count("SELECT COUNT(*) FROM activity WHERE action LIKE ?", action) > 0
-        steps = {"patient": count("SELECT COUNT(*) FROM patients") > 0,
+        steps = {"patient": count("SELECT COUNT(*) FROM patients WHERE record_type = 'Patient'") > 0,
                  "upload": count("SELECT COUNT(*) FROM documents WHERE kind = 'File'") > 0,
                  "question": did("asked a question"),
                  "note": count("SELECT COUNT(*) FROM documents WHERE kind = 'Note'") > 0,
@@ -1152,7 +1246,8 @@ def timeline(patient_uid):
             raise ValueError(f"No patient with ID {patient_uid}")
         add(patient["dob"], "birth", "Born", patient_uid)
         custom = json.loads(patient["custom"] or "{}")
-        for key, text in (("admission_date", f"Admitted ({patient['record_type']})"), ("placement_date", "Placed in foster home")):
+        admitted = f"Admitted ({patient['placement']})" if patient["placement"] else "Admitted"
+        for key, text in (("admission_date", admitted), ("placement_date", "Placed in foster home")):
             add(custom.get(key), "placement", text, patient_uid)
         for f in db.execute("""SELECT f.uid, f.fact, f.date, f.section, d.name AS document FROM facts f
                                JOIN documents d ON d.id = f.document_id WHERE d.patient_id = ? AND f.verified = 1""", (patient["id"],)):
@@ -1264,17 +1359,31 @@ def save_draft_edits(draft_uid, result):
     log("edited draft", patient_id, draft_uid)
 
 
+def first_statement(sql):
+    """The SQL statement in sql, without its semicolon. Stray symbols after it (models sometimes add "; }") are
+    ignored, but a second statement is refused."""
+    for i, character in enumerate(sql):
+        if character == ";" and sqlite3.complete_statement(sql[:i + 1]):  # a semicolon outside quotes ends it
+            if re.search(r"[A-Za-z]", sql[i + 1:]):
+                raise ValueError("Ask one thing at a time: only one query can run")
+            return sql[:i]
+    return sql
+
+
 def run_query(sql, limit=500):
     """Run a read-only SELECT for the assistant. The connection can't change anything, and long queries are stopped."""
-    statement = sql.strip().rstrip(";").strip()
+    statement = first_statement(sql.strip()).strip()
     if not statement.lower().startswith(("select", "with")):
         raise ValueError("Only questions that read data are allowed")
     with connect(read_only=True) as db:
         started = time.time()
         db.set_progress_handler(lambda: 1 if time.time() - started > 5 else 0, 10000)  # stop after 5 seconds
-        cursor = db.execute(statement)  # sqlite refuses more than one statement here
-        columns = [d[0] for d in cursor.description]
-        rows = [[("(file)" if isinstance(v, bytes) else v) for v in row] for row in cursor.fetchmany(limit)]
+        try:
+            cursor = db.execute(statement)  # sqlite refuses more than one statement here
+            columns = [d[0] for d in cursor.description]
+            rows = [[("(file)" if isinstance(v, bytes) else v) for v in row] for row in cursor.fetchmany(limit)]
+        except (sqlite3.Error, sqlite3.Warning) as error:  # a Warning: more than one statement
+            raise ValueError(f"The query didn't work: {error}")
     return {"columns": columns, "rows": rows}
 
 
@@ -1345,3 +1454,28 @@ def upgrade_to_v5(db):
 
 
 MIGRATIONS[5] = upgrade_to_v5
+
+
+def upgrade_to_v6(db):
+    """Version 6: people. Patients and legal guardians become two record types of one object. A patient's placement,
+    which used to be their record type, becomes a field; names split into first and last; a patient links to their
+    guardian's record; and gender is Male, Female or X."""
+    columns = {r[1] for r in db.execute("PRAGMA table_info(patients)")}
+    for column in ("first_name", "last_name", "placement", "guardian_uid"):
+        if column not in columns:  # (the very first version had a "placement" column; version 3 moved it to "cottage")
+            db.execute(f"ALTER TABLE patients ADD COLUMN {column} TEXT")
+    for r in db.execute("SELECT id, name, record_type, gender FROM patients").fetchall():
+        first, last = fieldtypes.split_name(r["name"])
+        gender = fieldtypes.normalize_gender(r["gender"])
+        db.execute("UPDATE patients SET first_name = ?, last_name = ?, record_type = 'Patient', placement = ?, gender = ? "
+                   "WHERE id = ?", (first, last, r["record_type"] if r["record_type"] in fieldtypes.PLACEMENTS else "",
+                                    gender if gender in fieldtypes.GENDERS or not gender else "X", r["id"]))
+    # The placements' own fields all belong to the Patient type now (the page shows the ones for the placement)
+    db.execute(RECORD_TYPES_TABLE)
+    db.execute(FIELD_DEFS_TABLE)
+    db.execute("DELETE FROM record_types WHERE object = 'patients'")  # Patient and Legal Guardian are added after this
+    db.execute("UPDATE OR IGNORE field_defs SET record_type = 'Patient' WHERE object = 'patients'")
+    db.execute("DELETE FROM field_defs WHERE object = 'patients' AND record_type != 'Patient'")
+
+
+MIGRATIONS[6] = upgrade_to_v6

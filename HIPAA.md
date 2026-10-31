@@ -22,12 +22,12 @@ Nothing is sent over the internet. Updates download code only, and never upload 
 | Safeguard | How MindChart meets it | How it's verified |
 |---|---|---|
 | **Unique user identification** §164.312(a)(2)(i), required | The clinician enters their name at setup. Every activity entry records it together with the macOS account. | Automated test checks the name appears on logged edits |
-| **Emergency access procedure** §164.312(a)(2)(ii), required | Records open only with the MindChart password, which isn't stored anywhere and can't be recovered by anyone. The password can be changed in Settings. **The organization must keep the password in a controlled place** (see below) so records stay reachable if the clinician is unavailable. | Password change tested, including a wrong current password |
+| **Emergency access procedure** §164.312(a)(2)(ii), required | Records open only with the MindChart password, which isn't stored anywhere (unless Touch ID is turned on, below) and can't be recovered by anyone. The password can be changed in Settings. **The organization must keep the password in a controlled place** (see below) so records stay reachable if the clinician is unavailable. | Password change tested, including a wrong current password |
 | **Automatic logoff** §164.312(a)(2)(iii) | Locks after 15 minutes without activity, when Lock is clicked, when the app quits, and if the app crashes (its server notices and locks). Locking removes records from the screen. | Tested: normal quit, forced quit (crash), idle lock |
 | **Encryption and decryption** §164.312(a)(2)(iv) | All records are kept in an **AES-256 encrypted disk image** (built into macOS) that only the password opens. MindChart also warns if the Mac's own disk encryption (FileVault) is off. | Raw files searched for record text while locked: none found |
 | **Audit controls** §164.312(b), required | An activity log records sign-ins (including failed attempts), uploads (and discarded ones), filing a document under a patient, opening patients and drafts, adding, editing and deleting records, building drafts, questions asked, and **every export**. Entries can't be edited or deleted in the app, and they're kept when a patient is deleted. The log can be exported as CSV. | Automated tests |
 | **Integrity** §164.312(c)(1) | Edits record the **old and new value** of each field. The activity log is **tamper-evident**: each entry carries a SHA-256 fingerprint chained to the entry before, and Settings rechecks the whole chain. Data upgrades back up the database first and run as all-or-nothing transactions. | Tested: altering one old entry is detected; a failed upgrade leaves data unchanged |
-| **Person or entity authentication** §164.312(d), required | A password of at least 10 characters opens the records. After 5 wrong attempts, each further attempt waits 30 seconds, doubling up to 15 minutes. | Automated test |
+| **Person or entity authentication** §164.312(d), required | A password of at least 10 characters opens the records. After 5 wrong attempts, each further attempt waits 30 seconds, doubling up to 15 minutes. **Touch ID (optional, off by default)** can open them instead: turning it on needs the password, which is then kept encrypted by a key in the Mac's Secure Enclave that works only on that Mac, only after a fingerprint, and stops working if fingerprints are added or removed. Each sign-in is logged with how it was done. | Automated test |
 | **Transmission security** §164.312(e)(1) | Nothing is transmitted: the app, its local server and the AI model all run on the Mac. The server listens only to the Mac itself, refuses requests from other web pages (host, origin and request-header checks, including DNS-rebinding protection), and refuses uploads over 200 MB. | Automated tests. Logs searched after processing records: no record contents found. Ollama confirmed listening on localhost only |
 
 ## Further protections
@@ -41,7 +41,7 @@ Nothing is sent over the internet. Updates download code only, and never upload 
 - **Error logs contain no record contents.** `~/Library/Logs/MindChart` records what failed and where in the code, so it's safe to send to the developer.
 - **Updates are code-only and verified.** Updates download from GitHub over HTTPS, are checked against a published SHA-256 checksum, replace only the app's files, and never touch the encrypted store. They never upload anything.
 - **Deleting is thorough.** Deleting a patient removes their documents, facts and drafts, and the database is rewritten so deleted records don't linger in free space.
-- **Tested before every release.** An automated test suite (107 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
+- **Tested before every release.** An automated test suite (122 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
 
 ## What the organization is responsible for
 
@@ -59,7 +59,7 @@ Nothing is sent over the internet. Updates download code only, and never upload 
 ## Known limitations
 
 - **One user per Mac.** There are no separate accounts or roles. Anyone with the password sees all records.
-- **No two-factor sign-in.** Access depends on the password and on the Mac's own login.
+- **No two-factor sign-in.** Access depends on the password and on the Mac's own login. With Touch ID turned on, anyone whose fingerprint is enrolled on that Mac can open the records, so only turn it on when the Mac's fingerprints are all the clinician's.
 - **The audit log detects tampering but can't prevent it.** Someone with the password and technical skill could delete the whole database. The fingerprint chain shows when individual entries have been altered or removed.
 - **AI drafts can be wrong or incomplete.** Every sentence cites its sources, and facts whose quote isn't found in the source are left out. In testing, drafts contained 27 to 32 of 32 known key facts. The clinician must review every draft.
 
