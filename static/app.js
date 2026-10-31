@@ -3,9 +3,9 @@
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const state = { session: null, objects: null, sectionTitles: {}, models: [], dirtyDraft: false, work: {}, uploads: null };
-const ICONS = { patients: "i-patients", guardians: "i-guardian", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity",
+const ICONS = { patients: "i-patients", guardians: "i-guardian", cottages: "i-cottage", documents: "i-documents", facts: "i-facts", drafts: "i-drafts", activity: "i-activity",
   medications: "i-meds", measures: "i-measures", follow_ups: "i-follow" };
-const PREFIXES = { PT: "patients", LG: "patients", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity", MED: "medications",
+const PREFIXES = { PT: "patients", LG: "patients", CTG: "cottages", DOC: "documents", FCT: "facts", DRF: "drafts", ACT: "activity", MED: "medications",
   MSR: "measures", FUP: "follow_ups" };
 const HIDDEN_COLUMNS = ["patient_id", "document_id", "notes", "quote", "read_by_model", "seq", "details", "read_state",
   "first_name", "last_name", "record_type", "guardian_id"];
@@ -239,7 +239,7 @@ function renderNav() {
   const here = location.hash || "#/";
   const items = [["#/", "Home", "i-home"], ["#/uploads", "Uploads", "i-upload"], ["#/list/patients", "Patients", ICONS.patients],
     ["#/list/guardians", "Guardians", ICONS.guardians],
-    ...["follow_ups", "medications", "documents", "facts", "drafts", "activity"]
+    ...["cottages", "follow_ups", "medications", "documents", "facts", "drafts", "activity"]
     .map((o) => [`#/list/${o}`, state.objects[o].plural, ICONS[o]]), ["#/settings", "Settings", "i-settings"]];
   // People's pages are all under #/r/patients/: PT-... for patients, LG-... for guardians
   const pages = { patients: "#/r/patients/PT-", guardians: "#/r/patients/LG-" };
@@ -266,6 +266,7 @@ window.addEventListener("hashchange", () => {
 async function route() {
   if ($("#app").hidden) return;
   renderNav();
+  state.medicationNames = null;
   const parts = (location.hash.slice(1) || "/").split("/").filter(Boolean);
   try {
     if (!parts.length) await homeView();
@@ -349,7 +350,7 @@ async function newPatientForm(target, recordType = "Patient") {
   form.querySelector("[data-cancel]").onclick = () => target.innerHTML = "";
   form.onsubmit = async () => {
     try {
-      const { id } = await api("POST", "records/patients", await withNewGuardian(formValues(form)));
+      const { id } = await api("POST", "records/patients", await withNewGuardians(formValues(form)));
       location.hash = `#/r/patients/${id}`;
     } catch (err) { form.querySelector(".error").textContent = err.message; }
     return false;
@@ -376,23 +377,41 @@ async function loadGuardians() {
   state.guardians = (await api("GET", "records/patients?type=Legal%20Guardian")).rows;
 }
 
-// "New guardian…" in a Legal guardian list: make the guardian's record first, then link to it.
-async function withNewGuardian(values) {
-  const first = (values["new_guardian.first_name"] || "").trim(), last = (values["new_guardian.last_name"] || "").trim();
-  delete values["new_guardian.first_name"];
-  delete values["new_guardian.last_name"];
-  if (values.guardian_uid === "__new") {
-    if (!first && !last) throw new Error("Enter the new guardian's name");
-    values.guardian_uid = (await api("POST", "records/patients", { record_type: "Legal Guardian", first_name: first, last_name: last })).id;
-  }
+// Guardians added with "New guardian…" are saved as records when the form is, then linked like the others.
+async function withNewGuardians(values) {
+  if (!Array.isArray(values.guardians)) return values;
+  values.guardians = await Promise.all(values.guardians.filter(Boolean).map(async (value) => {
+    if (!value.startsWith("new:")) return value;
+    const [first, last] = value.slice(4).split("|");
+    return (await api("POST", "records/patients", { record_type: "Legal Guardian", first_name: first, last_name: last })).id;
+  }));
   return values;
 }
 
+const guardianChip = (name, id, label) => `<label class="person-chip" title="Untick to remove">
+  <input type="checkbox" ${name} value="${esc(id)}" data-multi checked> ${esc(label)}</label>`;
+
 document.addEventListener("change", (e) => {
-  if (!e.target.matches("select[data-person]")) return;
-  const box = e.target.parentElement.querySelector(".new-guardian");
-  box.hidden = e.target.value !== "__new";
-  if (!box.hidden) box.querySelector("input").focus();
+  if (!e.target.matches("select[data-add-person]")) return;
+  const field = e.target.closest(".people-field"), value = e.target.value, name = `name="${field.dataset.name}"`;
+  if (value === "__new") {
+    field.querySelector(".new-guardian").hidden = false;
+    field.querySelector("[data-new-first]").focus();
+  } else if (value && ![...field.querySelectorAll(".person-chip input")].some((box) => box.value === value)) {
+    field.querySelector(".people-chosen").insertAdjacentHTML("beforeend", guardianChip(name, value, e.target.selectedOptions[0].text));
+  }
+  e.target.value = "";
+});
+
+document.addEventListener("click", (e) => {
+  if (!e.target.matches("[data-new-add]")) return;
+  const field = e.target.closest(".people-field");
+  const first = field.querySelector("[data-new-first]").value.trim(), last = field.querySelector("[data-new-last]").value.trim();
+  if (!first && !last) return field.querySelector("[data-new-first]").focus();
+  field.querySelector(".people-chosen").insertAdjacentHTML("beforeend",
+    guardianChip(`name="${field.dataset.name}"`, `new:${first}|${last}`, `${[first, last].filter(Boolean).join(" ")} (new)`));
+  field.querySelectorAll("[data-new-first], [data-new-last]").forEach((box) => { box.value = ""; });
+  field.querySelector(".new-guardian").hidden = true;
 });
 
 function splitName(name) {  // as MindChart does it: the last word is the last name, with any note in brackets after it
@@ -426,21 +445,29 @@ async function listView(object, search = "", recordType = "") {
   const icon = guardians ? ICONS.guardians : ICONS[object];
   const fetchRows = async (text) => {
     const rows = (await api("GET", `records/${object}?search=${encodeURIComponent(text)}${recordType ? `&type=${encodeURIComponent(recordType)}` : ""}`)).rows;
-    return guardians ? rows.map((r) => ({ ...r, ...JSON.parse(r.details || "{}") })) : rows;  // relationship and phone as columns
+    return guardians ? rows.map((r) => ({ ...r, ...JSON.parse(r.details || "{}"),  // relationship and phone as columns
+      drive: r.drive_minutes ? `about ${minutesText(r.drive_minutes)}` : null })) : rows;
   };
-  const columns = object !== "patients" ? undefined : guardians ? ["id", "name", "relationship", "phone", "guardian_of"]
+  const columns = object === "cottages" ? ["id", "name", "residents", "lead", "capacity"] : object !== "patients" ? undefined
+    : guardians ? ["id", "name", "relationship", "phone", "town", "drive", "guardian_of"]
     : ["id", "name", "placement", "dob", "gender", "status", "guardian", "documents"];
-  const table = (rows) => recordsTable(object, rows, columns);
+  const byMedication = object === "medications" && state.medicationView !== "all";
+  const table = (rows) => byMedication ? medicationsByName(rows) : recordsTable(object, rows, columns);
   const rows = await fetchRows(search);
+  if (object === "medications") state.medicationNames = (await api("GET", "medication-names")).medications;  // for categories
   const placeholder = object === "documents" ? "Search documents, including their text…" : `Search ${plural.toLowerCase()}…`;
   $("#view").innerHTML = `
     <div class="page-head"><span class="object-icon obj-${object}"><span class="${icon}"></span></span>
       <h1>${esc(plural)}</h1><span class="badge plain">${rows.length}</span><span class="grow"></span>
       ${object === "patients" ? `<button id="newPatient">+ New ${guardians ? "guardian" : "patient"}</button>` : ""}
-      ${object === "documents" ? '<button id="listUpload">Upload documents</button>' : ""}</div>
+      ${object === "documents" ? '<button id="listUpload">Upload documents</button>' : ""}
+      ${object === "cottages" ? '<button id="newCottage">+ New cottage</button>' : ""}
+      ${object === "medications" ? `<div class="segmented"><button class="${byMedication ? "on" : ""}" data-view="names">By medication</button>
+        <button class="${byMedication ? "" : "on"}" data-view="all">Every entry</button></div>` : ""}</div>
     <div id="newPatientForm"></div>
     <div class="list-tools"><input id="search" placeholder="${esc(placeholder)}" value="${esc(search)}"></div>
-    <div id="listBody">${rows.length ? table(rows) : '<p class="empty">Nothing here yet.</p>'}</div>`;
+    <div id="listBody">${rows.length ? table(rows) : '<p class="empty">Nothing here yet.</p>'}</div>
+    ${object === "cottages" ? '<div id="crossBox" style="margin-top:16px"></div>' : ""}`;
   let timer;
   $("#search").oninput = () => {
     clearTimeout(timer);
@@ -451,6 +478,112 @@ async function listView(object, search = "", recordType = "") {
   };
   if (object === "patients") $("#newPatient").onclick = () => newPatientForm($("#newPatientForm"), guardians ? "Legal Guardian" : "Patient");
   if (object === "documents") $("#listUpload").onclick = () => pickFiles();
+  if (object === "cottages") {
+    $("#newCottage").onclick = () => newCottageForm($("#newPatientForm"));
+    analysisCard($("#crossBox"), { title: "Dynamics across cottages", intro: "How the cottages compare, and what the records say about residents of different cottages together.",
+      analysis: (await api("GET", "cottages/analysis")).analysis, run: () => api("POST", "cottages/analyze", { model: modelChoice() }) });
+  }
+  $("#view").querySelectorAll("[data-view]").forEach((b) => b.onclick = () => {
+    state.medicationView = b.dataset.view;
+    listView(object, $("#search").value);
+  });
+}
+
+// Medications grouped by name: who's on each one now, and who was before.
+function medicationsByName(rows) {
+  const groups = {};
+  rows.forEach((r) => (groups[r.name] = groups[r.name] || []).push(r));
+  const category = (name) => (state.medicationNames || []).find((m) => m.name === name)?.category || "";
+  const people = (list) => list.map((m) => `${recordLink(m.patient_id, esc(m.patient))}${[m.dose, m.frequency].filter(Boolean).length
+    ? ` <span class="muted small">${esc([m.dose, m.frequency].filter(Boolean).join(" "))}</span>` : ""}`).join(", ");
+  return `<div class="med-groups">${Object.keys(groups).sort((a, b) => a.localeCompare(b)).map((name) => {
+    const now = groups[name].filter((m) => m.status === "Active" || m.status === "Planned"), before = groups[name].filter((m) => !now.includes(m));
+    return `<div class="med-group"><h3>${esc(name)} ${category(name) ? `<span class="badge plain">${esc(category(name))}</span>` : ""}</h3>
+      ${now.length ? `<p><span class="muted small">On it now (${now.length}):</span> ${people(now)}</p>` : ""}
+      ${before.length ? `<p><span class="muted small">Before:</span> ${people(before)}</p>` : ""}</div>`;
+  }).join("")}</div>`;
+}
+
+const minutesText = (m) => m < 60 ? `${m} min` : `${Math.floor(m / 60)} hr${m % 60 ? ` ${m % 60} min` : ""}`;
+const placeText = (p) => `${p.town}, ${p.state}${p.minutes ? ` · about ${minutesText(p.minutes)} drive from Children's Village (a rough estimate, without traffic)` : ""}`;
+
+// --- Suggestions under a text box (medications, ZIP codes): type to narrow them, arrows and Return to choose ----------
+
+const SUGGESTERS = {
+  async medications(text) {
+    state.medicationNames = state.medicationNames || (await api("GET", "medication-names")).medications;
+    const t = text.toLowerCase();
+    const rank = (m) => { const names = [m.name, ...m.brands].map((n) => n.toLowerCase());
+      return names.some((n) => n.startsWith(t)) ? 0 : names.some((n) => n.includes(t)) ? 1 : 2; };
+    const found = t ? state.medicationNames.filter((m) => rank(m) < 2).sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name))
+      : [...state.medicationNames].sort((a, b) => b.patients - a.patients || a.name.localeCompare(b.name));
+    const items = found.slice(0, 8).map((m) => ({ value: m.name, label: m.name, detail: [m.brands.slice(0, 3).join(", "), m.category,
+      m.patients ? `${m.patients} patient${m.patients > 1 ? "s" : ""} on it` : ""].filter(Boolean).join(" · ") }));
+    if (text && !state.medicationNames.some((m) => m.name.toLowerCase() === t)) items.push({ value: text, label: `Add “${text}”`, detail: "as a new medication" });
+    return items;
+  },
+  async zip(text) {
+    if (text.length < 2) return [];
+    const { results, home } = await api("GET", `zip?q=${encodeURIComponent(text)}`);
+    return results.map((p) => ({ value: p.zip, label: `${p.zip} · ${p.town}, ${p.state}`, detail: p.minutes ? `about ${minutesText(p.minutes)} from ${home}` : "" }));
+  },
+};
+
+function attachSuggest(input) {
+  const find = SUGGESTERS[input.dataset.suggest];
+  input.dataset.suggestReady = "1";
+  input.autocomplete = "off";
+  const wrap = document.createElement("span");
+  wrap.className = "suggest-wrap";
+  input.replaceWith(wrap);
+  wrap.append(input);
+  wrap.insertAdjacentHTML("beforeend", '<div class="suggest" hidden></div>');
+  const list = wrap.querySelector(".suggest");
+  let items = [], active = -1, timer;
+  const mark = () => [...list.children].forEach((b, i) => b.classList.toggle("active", i === active));
+  const pick = (item) => {
+    input.value = item.value;
+    list.hidden = true;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+  const show = async () => {
+    items = await find(input.value.trim());
+    active = items.length ? 0 : -1;
+    list.innerHTML = items.map((it, i) => `<button type="button" tabindex="-1" data-i="${i}"><b>${esc(it.label)}</b>${it.detail ? `<small>${esc(it.detail)}</small>` : ""}</button>`).join("");
+    mark();
+    list.hidden = !items.length || document.activeElement !== input;
+  };
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(show, 120); });
+  input.addEventListener("focus", show);
+  input.addEventListener("blur", () => setTimeout(() => { list.hidden = true; }, 150));
+  input.addEventListener("keydown", (e) => {
+    if (list.hidden || !items.length) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      active = (active + (e.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      mark();
+    } else if (e.key === "Enter" && active >= 0) {
+      e.preventDefault();
+      pick(items[active]);
+    } else if (e.key === "Escape") {
+      list.hidden = true;
+    }
+  });
+  list.addEventListener("mousedown", (e) => {
+    const button = e.target.closest("button");
+    if (button) { e.preventDefault(); pick(items[+button.dataset.i]); }
+  });
+  if (input.dataset.suggest === "zip") {  // the town and drive time for the ZIP code chosen
+    wrap.insertAdjacentHTML("afterend", '<div class="zip-place muted small"></div>');
+    const line = wrap.nextElementSibling;
+    const update = async () => {
+      const code = input.value.trim().slice(0, 5);
+      const found = /^\d{5}$/.test(code) ? (await api("GET", `zip?q=${code}`)).results.find((p) => p.zip === code) : null;
+      line.textContent = found ? placeText(found) : code ? "Not a ZIP code MindChart knows" : "";
+    };
+    input.addEventListener("change", update);
+    update();
+  }
 }
 
 // --- Record pages ------------------------------------------------------------------
@@ -499,19 +632,28 @@ function fieldInput(object, field, value, prefix = "") {
     input = `<input type="number" step="any" ${name} value="${esc(value)}">`;
   } else if (field.type === "picklist") {
     const options = field.options.map((o) => `<option value="${esc(o)}" ${o === value ? "selected" : ""}>${esc(field.name === "section" ? state.sectionTitles[o] || o : o)}</option>`);
-    input = `<select ${name}><option value=""></option>${options.join("")}</select>`;
+    // A value from before the field had these choices (a typed-in cottage, say) stays until someone picks another
+    const kept = value && !field.options.includes(value) ? `<option value="${esc(value)}" selected>${esc(value)} (not in the list)</option>` : "";
+    input = `<select ${name}><option value=""></option>${kept}${options.join("")}</select>`;
   } else if (field.type === "checkbox") {
     input = `<input type="checkbox" ${name} ${value ? "checked" : ""}>`;
   } else if (field.type === "longtext") {
     input = `<textarea ${name} rows="3">${esc(value)}</textarea>`;
-  } else if (field.type === "person") {  // a legal guardian's record, or a new one
-    input = `<select ${name} data-person><option value="">None</option>
-        ${(state.guardians || []).map((g) => `<option value="${esc(g.id)}" ${g.id === value ? "selected" : ""}>${esc(g.name)}</option>`).join("")}
-        <option value="__new">＋ New guardian…</option></select>
-      <div class="new-guardian" hidden><input name="new_guardian.first_name" placeholder="Guardian's first name">
-        <input name="new_guardian.last_name" placeholder="Last name"></div>`;
+  } else if (field.type === "people") {  // legal guardians: any number, from their records or added here
+    const chosen = Array.isArray(value) ? value : [];  // [{id, name}]
+    input = `<div class="people-field" data-name="${prefix}${field.name}">
+        <input type="checkbox" ${name} value="" data-multi hidden>
+        <div class="people-chosen">${chosen.map((g) => guardianChip(name, g.id, g.name)).join("")}</div>
+        <select data-add-person><option value="">Add a legal guardian…</option>
+          ${(state.guardians || []).map((g) => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join("")}
+          <option value="__new">＋ New guardian…</option></select>
+        <div class="new-guardian" hidden><input data-new-first placeholder="First name"><input data-new-last placeholder="Last name">
+          <button type="button" class="small secondary" data-new-add>Add</button></div></div>`;
+  } else if (field.type === "zip") {
+    input = `<input ${name} value="${esc(value)}" data-suggest="zip" inputmode="numeric" maxlength="10" placeholder="ZIP code or town">`;
   } else {
-    input = `<input ${name} value="${esc(value)}" ${field.type === "date" ? "data-date" : ""}>`;
+    const suggest = object === "medications" && field.name === "name" ? 'data-suggest="medications"' : "";
+    input = `<input ${name} value="${esc(value)}" ${field.type === "date" ? "data-date" : ""} ${suggest}>`;
   }
   return `<div class="field ${wide}"><label>${esc(field.label)}${field.required ? " *" : ""}</label>${input}</div>`;
 }
@@ -542,20 +684,22 @@ function detailsCard(object, data, editing) {
   const typeDefs = (recordType ? recordTypeFields(object, recordType) : [])
     .filter((d) => !people || recordType !== "Patient" || placementShows(d, record.placement, custom[d.name]));
   const heading = people && recordType === "Patient" ? `${record.placement || "Placement"} details` : `${recordType} details`;
-  const value = (f) => f.type === "person" ? record.guardian_id : record[f.name];  // the view names the guardian's ID guardian_id
-  const shown = (f) => f.type !== "person" ? display(object, f.name, record[f.name])
-    : record.guardian_id ? recordLink(record.guardian_id, esc(record.guardian)) : display(object, "guardian", record.guardian);
+  const guardians = data.guardians || [];
+  const value = (f) => f.type === "people" ? guardians : record[f.name];
+  const shown = (f) => f.type !== "people" ? display(object, f.name, record[f.name])
+    : guardians.length ? guardians.map((g) => recordLink(g.id, esc(g.name))).join(", ") : display(object, "guardian", record.guardian);
   const customView = typeDefs.length ? `<h3>${esc(heading)}</h3><div class="fields">${typeDefs.map((d) => {
       const source = sources[d.name];
       return `<div class="field ${d.type === "longtext" || d.type === "multipicklist" ? "wide" : ""}"><label>${esc(d.label)}
         ${source ? '<span class="ai-badge" title="Filled in by the AI. Check it against the quote.">✦ AI</span>' : ""}</label>
         <div class="value">${displayValue(d, custom[d.name])}</div>
+        ${d.type === "zip" && data.place ? `<div class="muted small">${esc(placeText(data.place))}</div>` : ""}
         ${source ? `<div class="ai-quote">“${esc(source.quote)}”${source.page ? ` p.${source.page}` : ""}</div>` : ""}</div>`;
     }).join("")}</div>` : "";
   const body = editing
     ? `<form id="editForm" onsubmit="return false">${people ? `<input type="hidden" name="record_type" value="${esc(recordType)}">` : ""}
         <div class="fields">${fields.filter((f) => f.edit !== false && !(people && f.name === "record_type")).map((f) => fieldInput(object, f, value(f))).join("")}</div>
-        ${people && record.guardian && !record.guardian_id ? `<p class="muted small">Legal guardian was typed in before guardians had their own
+        ${people && record.guardian && !guardians.length ? `<p class="muted small">Legal guardian was typed in before guardians had their own
           records: “${esc(record.guardian)}”. It stays until you choose or add their record above.</p>` : ""}
         <div class="custom-fields"></div>
         <div class="actions" style="margin-top:14px"><button type="submit">Save</button><button type="button" class="secondary" id="cancelEdit">Cancel</button><span class="error"></span></div></form>`
@@ -603,7 +747,7 @@ async function recordView(object, uid, editing = false) {
     $("#cancelEdit").onclick = () => recordView(object, uid);
     $("#editForm").onsubmit = async () => {
       try {
-        await api("POST", `records/${object}/${encodeURIComponent(uid)}`, await withNewGuardian(formValues($("#editForm"))));
+        await api("POST", `records/${object}/${encodeURIComponent(uid)}`, await withNewGuardians(formValues($("#editForm"))));
         await recordView(object, uid);
         toast("Saved ✓");
       } catch (err) { $("#editForm .error").textContent = err.message; }
@@ -613,6 +757,7 @@ async function recordView(object, uid, editing = false) {
     $("#editBtn").onclick = async () => { await recordView(object, uid, true); animateIn($("#recordBody")); };
   }
   if (object === "patients") (guardian ? guardianExtras : patientExtras)(data, body);
+  if (object === "cottages") cottageExtras(data, body);
   if (object === "documents") documentExtras(data, body);
 }
 
@@ -628,6 +773,86 @@ function factsBySection(facts, showDocument) {
         <span class="quote">“${esc(f.quote)}”${showDocument ? ` · ${recordLink(f.document_id, esc(f.document))}` : ""}${f.page ? ` p.${f.page}` : ""}
         · ${recordLink(f.id, "open")}</span></div>`).join("")}
     </details>`).join("");
+}
+
+function newCottageForm(target) {
+  target.innerHTML = `<form class="card" style="background:var(--panel-2);box-shadow:none" onsubmit="return false">
+      <div class="fields">${state.objects.cottages.fields.filter((f) => f.edit !== false).map((f) => fieldInput("cottages", f, "")).join("")}</div>
+      <div class="actions" style="margin-top:12px"><button type="submit">Save cottage</button>
+        <button type="button" class="secondary" data-cancel>Cancel</button><span class="error"></span></div></form>`;
+  const form = target.querySelector("form");
+  form.querySelector("[data-cancel]").onclick = () => target.innerHTML = "";
+  form.onsubmit = async () => {
+    try { location.hash = `#/r/cottages/${(await api("POST", "records/cottages", formValues(form))).id}`; }
+    catch (err) { form.querySelector(".error").textContent = err.message; }
+    return false;
+  };
+  form.querySelector("input")?.focus();
+}
+
+function cottageExtras(data, body) {
+  const { residents, past_residents: past } = data.related, name = data.record.name;
+  body.insertAdjacentHTML("beforeend", `<div class="card"><h2>Residents <span class="count">${residents.length}</span></h2>
+      ${residents.length ? recordsTable("patients", residents, ["id", "name", "dob", "gender", "admitted", "documents"])
+        : `<p class="empty">No one is in ${esc(name)} now. On a patient's page, click Edit, choose Residential treatment and this cottage.</p>`}
+      ${past.length ? `<details><summary class="muted small">Past residents (${past.length})</summary>${recordsTable("patients", past, ["id", "name", "dob", "status"])}</details>` : ""}</div>
+    <div id="analysisBox"></div>`);
+  analysisCard($("#analysisBox"), { title: "Cottage dynamics", intro: `How the youths in ${name} are doing together, from their records.`,
+    analysis: data.analysis, run: () => api("POST", `cottages/${encodeURIComponent(data.record.id)}/analyze`, { model: modelChoice() }) });
+}
+
+// --- Cottage dynamics: an experimental AI reading of the records, which asks for feedback ------------------------
+
+function analysisHTML(a) {
+  const sources = (list) => list.length ? `<details class="sources"><summary>From ${list.length} record${list.length > 1 ? "s" : ""}</summary>
+    ${list.map((s) => `<div class="quote">${recordLink(s.resident_id, esc(s.resident))}: “${esc(s.fact)}”
+      <span class="muted small">${esc(s.document)}${s.date ? `, ${esc(s.date)}` : ""}</span></div>`).join("")}</details>` : "";
+  const section = (heading, items, render) => items.length ? `<h3>${heading}</h3>
+    ${items.map((item) => `<div class="analysis-point">${render(item)}${sources(item.sources)}</div>`).join("")}` : "";
+  return `<p>${esc(a.summary)}</p>
+    ${section("Themes", a.themes, (x) => `<b>${esc(x.title)}.</b> ${esc(x.detail)}`)}
+    ${section("Between residents", a.interactions, (x) => esc(x.detail))}
+    ${section("Watch for", a.watch_for, (x) => esc(x.detail))}
+    <p class="muted small">${esc(String(a.created).replace("T", " ").slice(0, 16))} · ${esc(a.model)}</p>`;
+}
+
+function analysisCard(box, { title, intro, analysis, run }) {
+  const render = (a) => {
+    const f = a?.feedback;
+    box.innerHTML = `<div class="card analysis"><h2>${esc(title)} <span class="badge experimental">Experimental</span>
+        <span class="actions"><button class="small" data-run>${a ? "Analyze again" : "Analyze with AI"}</button></span></h2>
+      <p class="muted small">${esc(intro)} This is an experimental AI reading of the records, not a clinical assessment: check each
+        point against the records it cites. Your feedback shapes the next analyses.</p>
+      <div class="analysis-body">${a ? analysisHTML(a) : '<p class="empty">No analysis yet.</p>'}</div>
+      ${a ? `<div class="feedback"><span class="muted small">Was this helpful?</span>
+        <button type="button" class="secondary small ${f?.rating === "helpful" ? "on" : ""}" data-rate="helpful">Helpful</button>
+        <button type="button" class="secondary small ${f?.rating === "not helpful" ? "on" : ""}" data-rate="not helpful">Not helpful</button>
+        <textarea rows="2" placeholder="What was right, wrong or missing? The next analyses will take it into account.">${esc(f?.comment || "")}</textarea>
+        <button type="button" class="small" data-send>Send feedback</button><span class="muted small" data-sent>${f ? "Thanks, saved." : ""}</span></div>` : ""}</div>`;
+    box.querySelector("[data-run]").onclick = async () => {
+      const button = box.querySelector("[data-run]");
+      button.disabled = true;
+      box.querySelector(".analysis-body").innerHTML = '<div class="thinking"><span class="spinner"></span>Reading the records (on this Mac)…</div>';
+      aiBusy(true);
+      try { render(await run()); }
+      catch (err) { box.querySelector(".analysis-body").innerHTML = `<p class="error">${esc(err.message)}</p>`; button.disabled = false; }
+      finally { aiBusy(false); }
+    };
+    const feedback = box.querySelector(".feedback");
+    if (!feedback) return;
+    let rating = f?.rating || "";
+    feedback.querySelectorAll("[data-rate]").forEach((b) => b.onclick = () => {
+      rating = b.dataset.rate;
+      feedback.querySelectorAll("[data-rate]").forEach((other) => other.classList.toggle("on", other === b));
+    });
+    feedback.querySelector("[data-send]").onclick = async () => {
+      try {
+        await api("POST", `cottage-analyses/${a.id}/feedback`, { rating, comment: feedback.querySelector("textarea").value });
+        feedback.querySelector("[data-sent]").textContent = "Thanks, saved. The next analyses will take it into account.";
+      } catch (err) { feedback.querySelector("[data-sent]").textContent = err.message; }
+    };
+  };
+  render(analysis);
 }
 
 function guardianExtras(data, body) {
@@ -746,15 +971,44 @@ const todayText = () => formatDay(new Date());
 // ("3/4/24" -> "03/04/2024"); partial dates like "2019" or "March 2019" are left as typed.
 const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
+// A date typed in any way that can only mean one day, as MM/DD/YYYY ("12271994", "12-27-94", "Dec 27 1994" ->
+// "12/27/1994"), as the server does it too. Anything else comes back as typed.
 function tidyDate(text) {
-  const t = text.trim();
-  let m = t.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/);
-  if (m && +m[1] >= 1 && +m[1] <= 12 && +m[2] >= 1 && +m[2] <= 31) {
-    const year = m[3].length === 4 ? +m[3] : +m[3] <= new Date().getFullYear() % 100 ? 2000 + +m[3] : 1900 + +m[3];
-    return `${m[1].padStart(2, "0")}/${m[2].padStart(2, "0")}/${year}`;
+  const t = text.trim().replace(/\s+/g, " ");
+  const digits = t.match(/^(\d{2})(\d{2})(\d{4}|\d{2})$/);
+  let m = (digits ? digits.slice(1).join("/") : t).match(/^(\d{1,2})[/. -](\d{1,2})[/. -](\d{4}|\d{2})$/);
+  let day = null;
+  if (m) {
+    let year = +m[3];
+    if (m[3].length === 2) {  // the century nearest today, so "94" is 1994 and a due date in "27" is 2027
+      const now = new Date().getFullYear(), century = Math.floor(now / 100) * 100;
+      year = [century - 100, century, century + 100].map((c) => c + year).sort((a, b) => Math.abs(a - now) - Math.abs(b - now))[0];
+    }
+    day = new Date(year, m[1] - 1, +m[2]);
+    if (day.getMonth() !== m[1] - 1 || day.getDate() !== +m[2]) day = null;  // no such day
+  } else if (/^\d{4}-\d{1,2}-\d{1,2}$|^[A-Za-z]{3,}\.? \d{1,2}(st|nd|rd|th)?,? \d{4}$|^\d{1,2}(st|nd|rd|th)? [A-Za-z]{3,}\.?,? \d{4}$/.test(t)) {
+    day = parseDay(t.replace(/(\d)(st|nd|rd|th)/, "$1"));
   }
-  m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  return m ? `${m[2].padStart(2, "0")}/${m[3].padStart(2, "0")}/${m[1]}` : t;
+  return day && !isNaN(day) ? formatDay(day) : t;
+}
+
+function isDate(text) {  // MM/DD/YYYY, and a day that exists
+  const m = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/), day = m && new Date(+m[3], m[1] - 1, +m[2]);
+  return Boolean(day) && day.getMonth() === m[1] - 1 && day.getDate() === +m[2];
+}
+
+// Typing in a date box: the slashes go in by themselves ("12" -> "12/", "12/27/1994"), and a slash typed after one
+// digit fills in its zero ("1/" -> "01/"). Words such as "March 2019" aren't touched.
+function maskDate(input, e) {
+  if (!/^[\d/]*$/.test(input.value) || input.selectionStart !== input.value.length) return;
+  if (e.inputType && e.inputType.startsWith("delete")) return;
+  if (e.data === "/") {
+    const parts = input.value.split("/").filter((part, i, all) => part !== "" || i === all.length - 1).slice(0, 3);
+    input.value = parts.map((part, i) => (i < parts.length - 1 ? part.padStart(2, "0") : part)).join("/");
+    return;
+  }
+  const typed = input.value.split("/"), digits = typed.map((part, i) => (i < typed.length - 1 ? part.padStart(2, "0") : part)).join("").slice(0, 8);
+  input.value = digits.length < 2 ? digits : digits.length < 4 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : `${digits.slice(0, 2)}/${digits.slice(2, 4)}/${digits.slice(4)}`;
 }
 
 function enhanceDates(root = document) {
@@ -768,11 +1022,20 @@ function enhanceDates(root = document) {
     wrap.append(input);
     wrap.insertAdjacentHTML("beforeend", '<button type="button" class="date-btn" title="Choose a date" aria-label="Choose a date"><span class="i-calendar"></span></button>');
     wrap.querySelector(".date-btn").onclick = () => ($("#calendar")?.input === input ? closeCalendar() : openCalendar(input));
+    input.addEventListener("input", (e) => maskDate(input, e));
+    const check = () => {  // a date already on file as written in the records (such as "2019") can stay as it is
+      const ok = !input.value || isDate(input.value) || input.value === input.defaultValue;
+      input.setCustomValidity(ok ? "" : "Enter a date as MM/DD/YYYY, or pick one from the calendar");
+      wrap.classList.toggle("invalid", !ok);
+    };
     input.addEventListener("blur", () => {
       const tidy = tidyDate(input.value);
       if (tidy !== input.value) { input.value = tidy; input.dispatchEvent(new Event("change", { bubbles: true })); }
+      check();
     });
+    input.addEventListener("change", check);
   });
+  root.querySelectorAll("input[data-suggest]:not([data-suggest-ready])").forEach(attachSuggest);
 }
 new MutationObserver(() => enhanceDates()).observe(document.body, { childList: true, subtree: true });
 
@@ -1321,6 +1584,7 @@ async function settingsView() {
       <div class="field wide"><label>Records are stored in</label><div class="value small">${esc(s.data_location)}</div></div>
       <div class="field wide"><label>Error log (no patient details; send this if something goes wrong)</label><div class="value small">${esc(s.log_file)}</div></div>
       <div class="field"><label>Version</label><div class="value">${esc(s.version.current)}</div></div>
+      <div class="field"><label>ZIP code data</label><div class="value small">GeoNames (geonames.org), CC BY 4.0, built in: nothing is looked up online</div></div>
     </div>
     <div class="actions" style="margin-top:14px"><button class="secondary small" id="exportAudit">Export activity log (CSV)</button>
       <button class="link small" id="securityHelp">How your records are protected</button></div></div>

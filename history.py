@@ -398,6 +398,116 @@ PLAN_ACTION = re.compile(r"(continue|start|begin|initiate|increase|decrease|redu
                          r"recheck|repeat|follow[ -]up|refer|schedule|monitor|obtain|update)\s", re.I)
 
 
+COTTAGE_PROMPT = """You help a child and adolescent psychiatric nurse practitioner at a residential treatment center understand
+the dynamics within one cottage, a living unit several youths share. From ONLY the residents' details and the numbered
+facts below, write a short briefing for the clinical team:
+- "summary": two to four sentences on who lives there (ages, genders, how long they've been there) and the overall picture.
+- "themes": patterns several residents share, or that affect the group (aggression toward peers, trauma reminders,
+  substance use, sleep, recent incidents...), naming the residents involved.
+- "interactions": what the records say about two or more of these residents together (conflicts, incidents, alliances).
+  Only what the facts state; leave it empty if nothing is recorded.
+- "watch_for": specific things staff could watch for.
+Rules:
+- Never add diagnoses, events, risks or interactions the facts don't state, and don't guess at causes.
+- Refer to residents by first name. Every theme, interaction and thing to watch for cites the numbers of the facts it
+  comes from (at least one).
+- Plain, respectful clinical language. If the records say too little to describe the group, say so in the summary."""
+
+
+INTERCOTTAGE_PROMPT = """You help a child and adolescent psychiatric nurse practitioner at a residential treatment center see how the
+cottages (living units) compare and how their residents affect one another. From ONLY the cottages' residents and the
+numbered facts below (facts in which one resident's records name a resident of another cottage), write a short briefing:
+- "summary": two to four sentences comparing the cottages (how many residents, ages, genders) and the overall picture.
+- "themes": differences or patterns across cottages worth the team's attention, naming the cottages involved.
+- "interactions": what the records say about residents of different cottages together (conflicts, incidents, contact).
+  Only what the facts state; leave it empty if nothing is recorded.
+- "watch_for": specific things staff could watch for across cottages.
+Rules:
+- Never add diagnoses, events, risks or interactions the facts don't state, and don't guess at causes.
+- Refer to residents by first name. Every theme, interaction and thing to watch for cites the numbers of the facts it
+  comes from (at least one); a theme comparing cottages' makeup may cite none if it rests only on the resident lists.
+- Plain, respectful clinical language. If the records say too little, say so in the summary."""
+
+FEEDBACK_NOTE = """
+This is experimental, and the clinician gives feedback on these briefings. Where it fits, follow their recent feedback:
+{feedback}"""
+
+
+def unnumbered(text):
+    """Text without fact numbers the model wrote into it ("[3]", "(facts 2 and 5)")."""
+    return re.sub(r"\s*[\[(](?:facts?\s*)?\d+(?:\s*(?:,|and|-|&)\s*(?:facts?\s*)?\d+)*[\])]", "", text or "", flags=re.I).strip()
+
+
+def grounded(items, keys, facts, required=True):
+    """The points that cite real facts (or all of them, when required is False), with those facts as their sources."""
+    kept = []
+    for item in items or []:
+        sources = [facts[n - 1] for n in dict.fromkeys(item.get("facts") or []) if isinstance(n, int) and 0 < n <= len(facts)]
+        if (sources or not required) and unnumbered(item.get("detail")):
+            kept.append({**{k: unnumbered(item.get(k)) if isinstance(item.get(k), str) else item.get(k) for k in keys},
+                         "sources": [{k: s[k] for k in ("resident", "resident_id", "fact", "document", "date")} for s in sources]})
+    return kept
+
+
+def briefing_schema(group_key):
+    text, cited = {"type": "string", "maxLength": 700}, {"type": "array", "items": {"type": "integer"}}
+    names = {"type": "array", "items": {"type": "string", "maxLength": 80}}
+    return {"type": "object", "properties": {
+        "summary": {"type": "string", "maxLength": 1200},
+        "themes": {"type": "array", "items": {"type": "object", "properties": {"title": {"type": "string", "maxLength": 80},
+                   "detail": text, group_key: names, "facts": cited}, "required": ["title", "detail", group_key, "facts"]}},
+        "interactions": {"type": "array", "items": {"type": "object", "properties": {"detail": text, "residents": names, "facts": cited},
+                         "required": ["detail", "residents", "facts"]}},
+        "watch_for": {"type": "array", "items": {"type": "object", "properties": {"detail": text, "facts": cited},
+                      "required": ["detail", "facts"]}}},
+        "required": ["summary", "themes", "interactions", "watch_for"]}
+
+
+def with_feedback(prompt, feedback):
+    lines = [f"- ({f['rating']}) {f['comment']}" for f in feedback or [] if f.get("comment")]
+    return prompt + FEEDBACK_NOTE.format(feedback="\n".join(lines)) if lines else prompt
+
+
+def analyze_cottage(model, thinking, inputs, feedback=()):
+    """An experimental briefing on one cottage's dynamics from its residents' records (vault.cottage_inputs). Every point
+    cites the facts it comes from; points citing none are dropped. feedback: the clinician's recent comments, to follow.
+    Returns {"summary", "themes", "interactions", "watch_for"}, each point with its "sources"."""
+    if not inputs["residents"]:
+        raise ValueError("No one lives in this cottage yet. Set patients' Cottage to it first.")
+    facts = inputs["facts"]
+    lines = [f"Cottage: {inputs['cottage']}", "Residents:"]
+    for r in inputs["residents"]:
+        about = ", ".join(x for x in (f"{r['age']}" if r["age"] is not None else "", r["gender"],
+                                      f"admitted {r['admitted']}" if r["admitted"] else "") if x)
+        lines.append(f"- {r['name']}{' (' + about + ')' if about else ''}."  # (no "no medications": models over-generalize it)
+                     f"{' Current medications: ' + ', '.join(r['medications']) + '.' if r['medications'] else ''}"
+                     f"{' Latest scores: ' + '; '.join(r['scores']) + '.' if r['scores'] else ''}")
+    lines.append("Facts:")
+    lines += [f"[{n}] ({f['resident']}; {f['document']}{', ' + f['date'] if f['date'] else ''}) {f['fact']}" for n, f in enumerate(facts, 1)]
+    reply = ask(model, thinking, with_feedback(COTTAGE_PROMPT, feedback), "\n".join(lines), briefing_schema("residents"), max_tokens=4000)
+    return {"summary": unnumbered(reply.get("summary")), "themes": grounded(reply.get("themes"), ("title", "detail", "residents"), facts),
+            "interactions": grounded(reply.get("interactions"), ("detail", "residents"), facts),
+            "watch_for": grounded(reply.get("watch_for"), ("detail",), facts)}
+
+
+def analyze_cottages(model, thinking, inputs, feedback=()):
+    """An experimental briefing across all the cottages (vault.intercottage_inputs), in the same shape as analyze_cottage."""
+    if not inputs["cottages"]:
+        raise ValueError("No one is in a cottage yet. Set patients' Cottage first.")
+    facts = inputs["facts"]
+    lines = ["Cottages and their current residents:"]
+    for c in inputs["cottages"]:
+        lines.append(f"- {c['name']}: " + "; ".join(f"{r['name']}" + (f" ({', '.join(x for x in (str(r['age']) if r['age'] is not None else '', r['gender']) if x)})"
+                                                                      if r["age"] is not None or r["gender"] else "") for r in c["residents"]))
+    lines.append("Facts naming a resident of another cottage:" if facts else "No facts name a resident of another cottage.")
+    lines += [f"[{n}] ({f['resident']}; {f['document']}{', ' + f['date'] if f['date'] else ''}) {f['fact']}" for n, f in enumerate(facts, 1)]
+    reply = ask(model, thinking, with_feedback(INTERCOTTAGE_PROMPT, feedback), "\n".join(lines), briefing_schema("cottages"), max_tokens=4000)
+    return {"summary": unnumbered(reply.get("summary")),
+            "themes": grounded(reply.get("themes"), ("title", "detail", "cottages"), facts, required=False),
+            "interactions": grounded(reply.get("interactions"), ("detail", "residents"), facts),
+            "watch_for": grounded(reply.get("watch_for"), ("detail",), facts)}
+
+
 def extract_facts(model, thinking, doc, chunk):
     """The facts in one part of a document. If the answer runs too long, read each half separately.
 

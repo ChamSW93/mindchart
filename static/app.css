@@ -504,3 +504,49 @@ details.past summary { cursor: pointer; margin-bottom: 8px; }
 #calendar .cal-grid button.today { color: var(--accent); font-weight: 600; box-shadow: inset 0 0 0 1px var(--accent); }
 #calendar .cal-grid button.picked { background: var(--accent); color: var(--on-accent); }
 #calendar .cal-foot { display: flex; justify-content: space-between; margin-top: 8px; }
+
+/* Legal guardians: a patient can have several */
+.people-field { display: flex; flex-direction: column; gap: 8px; }
+.people-chosen { display: flex; flex-wrap: wrap; gap: 6px; }
+.people-chosen:empty { display: none; }
+.person-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent-strong); font-size: 13.5px; cursor: pointer; }
+.person-chip:has(input:not(:checked)) { background: none; color: var(--muted); text-decoration: line-through; box-shadow: inset 0 0 0 1px var(--border-strong); }
+
+/* Suggestions under a text box */
+.suggest-wrap { position: relative; display: block; }
+.suggest-wrap > input { width: 100%; }
+.suggest { position: absolute; z-index: 40; left: 0; right: 0; top: calc(100% + 4px); background: var(--panel);
+  border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: var(--shadow), 0 12px 28px rgba(0, 0, 0, .16);
+  padding: 4px; max-height: 300px; overflow-y: auto; }
+.suggest button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; text-align: left;
+  background: none; border: 0; box-shadow: none; color: var(--text); padding: 7px 10px; border-radius: 8px; min-height: 0; font: inherit; }
+.suggest button small { color: var(--muted); font-size: 12px; }
+.suggest button b { font-weight: 500; }
+.suggest button.active, .suggest button:hover { background: var(--accent-soft); }
+.zip-place { margin-top: 4px; min-height: 1em; }
+
+/* A date that isn't a real day */
+.date-field.invalid input { border-color: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+
+/* Medications, by medication */
+.segmented { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 999px; padding: 2px; gap: 2px; }
+.segmented button { background: none; border: 0; box-shadow: none; color: var(--muted); padding: 5px 12px; border-radius: 999px; min-height: 0; font-size: 13px; }
+.segmented button.on { background: var(--accent-soft); color: var(--accent-strong); }
+.med-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.med-group { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; }
+.med-group h3 { margin: 0 0 6px; font-size: 15px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.med-group p { margin: 4px 0; font-size: 13.5px; line-height: 1.5; }
+
+/* Cottages */
+.i-cottage { --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 9.5 10 3.5l7 6'/%3E%3Cpath d='M5 8.2V16.5h10V8.2'/%3E%3Cpath d='M8.5 16.5v-4.2h3v4.2'/%3E%3C/svg%3E"); }
+.obj-cottages { background: var(--accent-soft); color: var(--accent); }
+.badge.experimental { background: var(--warn-soft); color: var(--warn); vertical-align: middle; }
+.analysis h3 { font-size: 14px; margin: 16px 0 6px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.analysis-point { padding: 8px 0; border-top: 1px solid var(--border); font-size: 14.5px; line-height: 1.55; }
+.analysis-point:first-of-type { border-top: 0; }
+.sources summary { color: var(--accent); font-size: 12.5px; cursor: pointer; margin-top: 4px; }
+.sources .quote { font-size: 13px; color: var(--muted); margin: 6px 0 0 12px; }
+.feedback { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--border-strong); }
+.feedback textarea { flex-basis: 100%; }
+.feedback button.on { background: var(--accent-soft); color: var(--accent-strong); border-color: var(--accent); }

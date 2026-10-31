@@ -29,7 +29,7 @@ Updates install by themselves when you open MindChart. To quit, press ⌘Q; that
 
 MindChart starts with a short tour of each part of the app. Take it (or skip it, and take it later from **Settings**). The **?** button next to the bar at the top explains whatever page you're on, and the green padlock at the top left explains how your records are protected.
 
-1. Add a patient with **+ New patient**: *Jordan Avery*, date of birth *05/14/2011* (the child in the sample records).
+1. Add a patient with **+ New patient**: first name *Jordan*, last name *Avery*, date of birth *05/14/2011* (the child in the sample records).
 2. Drag the files from Documents → **MindChart sample records (fictional)** onto the MindChart window, or click **Upload documents** on Home.
 3. In **Uploads**, check each review card: the type MindChart suggests (and how sure it is), the patient it matched, and what it will take from the document. Confirm them one by one, or with **Confirm all that are ready**.
    - Try dropping a file onto a *different* patient's page. The card should warn you.
@@ -52,8 +52,10 @@ MindChart starts with a short tour of each part of the app. Take it (or skip it,
    - *Jordan's PHQ-A was 11 today*
    - *Remind me to renew Jordan's medication consent by 12/01*
    - *Who is on sertraline?*
-9. Browse **Patients**, **Guardians**, **Documents** and **Facts**, open a record and **Edit** it. Give a patient a legal guardian (choose **New guardian…** to add one), and try typing a date or picking one from the calendar in the box.
-10. Click **Lock MindChart**, then sign back in.
+9. Browse **Patients**, **Guardians**, **Documents** and **Facts**, open a record and **Edit** it. Give a patient one or more legal guardians (choose **New guardian…** to add one) and a guardian's ZIP code, and try typing a date or picking one from the calendar in the box.
+10. Add a medication from the list (try typing a brand name), and look at **Medications → By medication**.
+11. Put a few fictional patients in a cottage, open it under **Cottages**, and try **Analyze with AI** (experimental). Tell it what was helpful or not.
+12. Click **Lock MindChart**, then sign back in.
 
 ## Feedback
 

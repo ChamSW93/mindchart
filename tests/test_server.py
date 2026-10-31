@@ -86,12 +86,20 @@ class Server(unittest.TestCase):
         fields = self.request("GET", "/api/objects")[1]["objects"]["patients"]["fields"]
         self.assertEqual(next(f for f in fields if f["name"] == "gender")["options"], ["Male", "Female", "X"])
 
+    def test_zip_and_medication_lookups(self):
+        support.unlocked_vault()
+        found = self.request("GET", "/api/zip?q=10701")[1]
+        self.assertEqual((found["results"][0]["town"], found["home"]), ("Yonkers", "Children's Village"))
+        self.assertEqual(self.request("GET", "/api/zip?q=Dobbs")[1]["results"][0]["zip"], "10522")
+        names = [m["name"] for m in self.request("GET", "/api/medication-names")[1]["medications"]]
+        self.assertIn("Sertraline", names)
+
     def test_record_routes(self):
         support.unlocked_vault()
         status, created = self.request("POST", "/api/records/patients", {"name": "Server Test (fictional)"})
         self.assertEqual(status, 200)
-        status, record = self.request("POST", f"/api/records/patients/{created['id']}", {"custom": {"cottage": "Cottage 9"}})
-        self.assertEqual(record["custom"]["cottage"], "Cottage 9")
+        status, record = self.request("POST", f"/api/records/patients/{created['id']}", {"custom": {"cottage": "Rose"}})
+        self.assertEqual(record["custom"]["cottage"], "Rose")
         self.assertEqual(self.request("GET", "/api/records/nonsense")[0], 400)
         self.assertEqual(self.request("GET", "/api/no/such/route")[0], 400)
         settings = self.request("GET", "/api/settings")[1]

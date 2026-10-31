@@ -16,7 +16,7 @@ import vault
 # What the model can set for a patient: their full name (MindChart splits it into first and last), the shared fields
 # it can fill from what's said, and the Patient type's own fields. Guardians are picked on the patient's page.
 PATIENT_FIELDS = ["name"] + [f["name"] for f in vault.OBJECTS["patients"]["fields"] if f.get("edit", True) and f["name"] not in
-                             ("first_name", "last_name", "record_type", "guardian_uid")] + [
+                             ("first_name", "last_name", "record_type", "guardians")] + [
     d["name"] for d in fieldtypes.DEFAULT_RECORD_TYPES["patients"]["Patient"]]
 
 # Medications, measures and follow-ups logged from the command bar: {intent: (object, fields the model can fill)}.
@@ -53,8 +53,8 @@ Decide what the person wants:
   views below. To filter by a patient, use their record ID from the list at the end (patient_id = 'PT-...'),
   never their name. Match other text with LIKE and % wildcards (it ignores case). Add LIMIT 200. Never change data.
 - "new_patient": they want to add a patient. Fill "patient_fields" with what they gave ("name", their full name, is
-  required), including "placement" and that placement's own fields (for example "placement Cottage 4" means placement
-  "Residential treatment" and cottage "Cottage 4"). Placements: {placements}. "gender" is Male, Female or X.
+  required), including "placement" and that placement's own fields (for example "Collins cottage" means placement
+  "Residential treatment" and cottage "Collins"). Placements: {placements}. "gender" is Male, Female or X.
 - "add_note": they're giving information about a patient to record (an observation, event, medication change,
   phone call, incident). Put the patient's ID or name in "patient". Write "note_text" as a clear clinical note in
   the third person keeping every detail they gave and adding nothing. "note_date" is the date they mention, else "".
@@ -90,12 +90,14 @@ Examples (with PT-XXXXXX standing for the patient's real record ID from the list
 - "Who has an order of protection?" -> SELECT DISTINCT patient, patient_id, fact FROM facts_view WHERE fact LIKE '%order of protection%' LIMIT 200
 - "How many active patients are there?" -> SELECT COUNT(*) AS active_patients FROM patients_view WHERE status = 'Active'
 - "Which patients are in foster care?" -> SELECT id, name, guardian FROM patients_view WHERE placement = 'Foster care' LIMIT 200
-- "Who is Sam's legal guardian, and their phone?" -> SELECT g.name, json_extract(g.details, '$.relationship') AS relationship,
-  json_extract(g.details, '$.phone') AS phone FROM guardians_view g JOIN patients_view p ON p.guardian_id = g.id WHERE p.id = 'PT-XXXXXX'
+- "Who lives in Collins?" -> SELECT id, name FROM patients_view WHERE json_extract(details, '$.cottage') = 'Collins' AND status != 'Discharged' LIMIT 200
+- "Who are Sam's legal guardians, and their phone numbers?" -> SELECT g.name, json_extract(g.details, '$.relationship') AS relationship,
+  json_extract(g.details, '$.phone') AS phone FROM guardians_view g JOIN guardianships_view l ON l.guardian_id = g.id WHERE l.patient_id = 'PT-XXXXXX'
 - "Facts that aren't verified" -> SELECT patient, section, fact FROM facts_view WHERE verified = 0 LIMIT 200
 
 People are patients (patients_view) or legal guardians (guardians_view, with "guardian_of" naming their patients).
-A patient's "guardian" is their legal guardian's name and "guardian_id" their guardian's record ID (LG-...).
+A patient's "guardian" lists their legal guardians' names. guardianships_view links each patient (patient_id) to
+each of their guardians (guardian_id, LG-...); a patient can have several, and a guardian several patients.
 Record types. People have a record type (Patient or Legal Guardian) and documents a document_type; each has its own
 fields, stored as JSON in the view's "details" column (a patient's placement decides which of theirs apply). Read one with json_extract(details, '$.field_name'); yes/no fields are 1 or 0.
 {record_types}
@@ -115,7 +117,7 @@ def view_columns():
     with vault.connect(read_only=True) as db:
         return {
             name: [row[1] for row in db.execute(f"PRAGMA table_info({name}_view)")]
-            for name in [*vault.OBJECTS, "guardians"]
+            for name in [*vault.OBJECTS, "guardians", "guardianships"]
         }
 
 

@@ -214,6 +214,10 @@ class MedicationsAndNotes(unittest.TestCase):
         self.assertEqual(key("Sertraline 50 mg tablets"), "sertraline")
         self.assertNotEqual(key("Vitamin D"), key("Vitamin B12"))
 
+    def test_fact_numbers_are_taken_out_of_briefings(self):
+        self.assertEqual(history.unnumbered("Devon was vaping (Fact 1). Eli felt pressured (Fact 1, Fact 3) [2]."),
+                         "Devon was vaping. Eli felt pressured.")
+
     def test_visit_notes_have_four_parts(self):
         history.ask = lambda *a, **k: {"subjective": "S", "objective": "O", "assessment": "A", "plan": "P"}
         self.assertEqual(history.draft_visit_note("m", False, "Since last visit: better"), {"subjective": "S", "objective": "O",

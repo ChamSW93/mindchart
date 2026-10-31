@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 
 import fields as fieldtypes
+import zipcodes
 
 # Where the data lives. This stays the same if the app is renamed, so saved records are always found.
 HOME = Path(os.environ.get("MINDCHART_DATA", Path.home() / "Library" / "Application Support" / "MindChart"))
@@ -51,7 +52,7 @@ MOUNT = HOME / ".unlocked"
 DATABASE = MOUNT / "records.db"
 AUTO_LOCK_MINUTES = 15
 MIN_PASSWORD_LENGTH = 10
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 BACKUPS_KEPT = 5
 MAX_ATTEMPTS = 5  # wrong passwords allowed before MindChart makes you wait
 
@@ -77,6 +78,15 @@ UPLOADS_TABLE = """CREATE TABLE IF NOT EXISTS uploads (
 EXAMPLES_TABLE = """CREATE TABLE IF NOT EXISTS type_examples (
     id INTEGER PRIMARY KEY, document_id INTEGER UNIQUE REFERENCES documents(id) ON DELETE CASCADE,
     document_type TEXT, name TEXT, text TEXT, added TEXT);"""
+# Which legal guardians each patient has. Either side can have several; links go when either person is deleted.
+GUARDIANSHIPS_TABLE = """CREATE TABLE IF NOT EXISTS guardianships (
+    patient_id INTEGER REFERENCES patients(id) ON DELETE CASCADE, guardian_id INTEGER REFERENCES patients(id) ON DELETE CASCADE,
+    PRIMARY KEY (patient_id, guardian_id));"""
+# The AI's experimental readings of a cottage's dynamics (cottage_id) or of all the cottages together (no cottage_id),
+# with the clinician's feedback on each, which guides later readings. A cottage's go when it's deleted.
+COTTAGE_ANALYSES_TABLE = """CREATE TABLE IF NOT EXISTS cottage_analyses (
+    id INTEGER PRIMARY KEY, cottage_id INTEGER REFERENCES cottages(id) ON DELETE CASCADE, created TEXT, model TEXT, result TEXT,
+    feedback TEXT);"""
 EXAMPLE_CHARS = 3000  # how much of a document's opening text is kept as an example
 
 _last_activity = time.time()
@@ -107,9 +117,10 @@ OBJECTS = {
             {"name": "status", "label": "Status", "type": "picklist", "options": ["Active", "Pending", "Discharged"],
              "for": ["Patient"]},
             {"name": "placement", "label": "Placement", "type": "picklist", "options": fieldtypes.PLACEMENTS, "for": ["Patient"]},
-            {"name": "guardian_uid", "label": "Legal guardian", "type": "person", "record_type": "Legal Guardian",
-             "for": ["Patient"]},
-            # The guardian's name, kept in step with the guardian's record (or, from before guardians were records, as typed)
+            # Links to the patient's guardians' records, kept in the guardianships table rather than a column
+            {"name": "guardians", "label": "Legal guardians", "type": "people", "record_type": "Legal Guardian",
+             "for": ["Patient"], "virtual": True},
+            # A guardian typed in before guardians had records of their own, kept until someone links their record
             {"name": "guardian", "label": "Legal guardian", "type": "text", "edit": False, "hidden": True},
             {"name": "notes", "label": "Notes", "type": "longtext"},
             {"name": "created", "label": "Created", "type": "datetime", "edit": False},
@@ -188,6 +199,17 @@ OBJECTS = {
             {"name": "notes", "label": "Notes", "type": "longtext"},
         ],
     },
+    # The Children's Village cottages. Patients name theirs in their Cottage field, whose choices are these records.
+    "cottages": {
+        "label": "Cottage", "plural": "Cottages", "prefix": "CTG", "title_field": "name",
+        "fields": [
+            {"name": "name", "label": "Name", "type": "text", "required": True},
+            {"name": "lead", "label": "Cottage lead", "type": "text"},
+            {"name": "capacity", "label": "Capacity", "type": "number"},
+            {"name": "notes", "label": "Notes", "type": "longtext"},
+            {"name": "created", "label": "Created", "type": "datetime", "edit": False},
+        ],
+    },
     "activity": {
         "label": "Activity", "plural": "Activity", "prefix": "ACT", "title_field": "action",
         "fields": [
@@ -211,7 +233,7 @@ def table_sql(name):
     if spec.get("parent"):
         on_delete = "SET NULL" if name == "activity" else "CASCADE"  # keep the log when a patient is deleted
         columns.append(f"{PARENT_COLUMN[spec['parent']]} INTEGER REFERENCES {spec['parent']}(id) ON DELETE {on_delete}")
-    columns += [f"{f['name']} {column_type(f)}" for f in spec["fields"]]
+    columns += [f"{f['name']} {column_type(f)}" for f in spec["fields"] if not f.get("virtual")]
     # "custom" holds the record type's own fields as JSON (see fields.py).
     # Documents also note whether they're waiting to be read in the background (read_state) and what to take from them (pull).
     columns += {"patients": ["custom TEXT"], "documents": ["original BLOB", "pages TEXT", "read_at TEXT", "custom TEXT",
@@ -226,21 +248,32 @@ def table_sql(name):
 # Views with patient and document details joined in, used by lists, search and the assistant.
 VIEWS = """
 DROP VIEW IF EXISTS people_view; DROP VIEW IF EXISTS patients_view; DROP VIEW IF EXISTS guardians_view;
+DROP VIEW IF EXISTS guardianships_view; DROP VIEW IF EXISTS cottages_view;
 DROP VIEW IF EXISTS documents_view; DROP VIEW IF EXISTS facts_view;
 DROP VIEW IF EXISTS drafts_view; DROP VIEW IF EXISTS activity_view; DROP VIEW IF EXISTS medications_view;
 DROP VIEW IF EXISTS measures_view; DROP VIEW IF EXISTS follow_ups_view;
 CREATE VIEW people_view AS
     SELECT p.uid AS id, p.name, p.first_name, p.last_name, p.record_type, p.dob, p.gender, p.mrn, p.status, p.placement,
-           p.guardian_uid AS guardian_id, COALESCE(g.name, p.guardian) AS guardian, p.notes, p.created,
-           (SELECT COUNT(*) FROM documents d WHERE d.patient_id = p.id) AS documents,
+           COALESCE((SELECT group_concat(g.name, ', ') FROM guardianships gs JOIN patients g ON g.id = gs.guardian_id
+                     WHERE gs.patient_id = p.id), NULLIF(p.guardian, '')) AS guardian,  -- their legal guardians' names
+           p.notes, p.created, (SELECT COUNT(*) FROM documents d WHERE d.patient_id = p.id) AS documents,
            p.custom AS details  -- the record type's own fields, as JSON
-    FROM patients p LEFT JOIN patients g ON g.uid = p.guardian_uid;
+    FROM patients p;
 CREATE VIEW patients_view AS SELECT * FROM people_view WHERE record_type = 'Patient';
 CREATE VIEW guardians_view AS
     SELECT g.uid AS id, g.name, g.first_name, g.last_name, g.notes, g.created,
-           (SELECT group_concat(p.name, ', ') FROM patients p WHERE p.guardian_uid = g.uid) AS guardian_of,
+           (SELECT group_concat(p.name, ', ') FROM guardianships gs JOIN patients p ON p.id = gs.patient_id
+            WHERE gs.guardian_id = g.id) AS guardian_of,
            g.custom AS details
     FROM patients g WHERE g.record_type = 'Legal Guardian';
+CREATE VIEW cottages_view AS
+    SELECT c.uid AS id, c.name, c.lead, c.capacity,
+           (SELECT COUNT(*) FROM patients p WHERE p.record_type = 'Patient' AND COALESCE(p.status, '') != 'Discharged'
+            AND json_extract(p.custom, '$.cottage') = c.name) AS residents, c.notes, c.created
+    FROM cottages c;
+CREATE VIEW guardianships_view AS
+    SELECT p.uid AS patient_id, p.name AS patient, g.uid AS guardian_id, g.name AS guardian
+    FROM guardianships gs JOIN patients p ON p.id = gs.patient_id JOIN patients g ON g.id = gs.guardian_id;
 CREATE VIEW documents_view AS
     SELECT d.uid AS id, p.uid AS patient_id, p.name AS patient, d.name, d.kind, d.document_type, d.document_date,
            d.author, d.added, d.read_by_model, (SELECT COUNT(*) FROM facts f WHERE f.document_id = d.id) AS facts,
@@ -369,9 +402,10 @@ def prepare_database(db):
                 raise
         db.isolation_level = ""
     db.executescript("\n".join(table_sql(name) for name in OBJECTS) + SETTINGS_TABLE + FIELD_DEFS_TABLE
-                     + RECORD_TYPES_TABLE + UPLOADS_TABLE + EXAMPLES_TABLE + VIEWS)
+                     + RECORD_TYPES_TABLE + UPLOADS_TABLE + EXAMPLES_TABLE + GUARDIANSHIPS_TABLE + COTTAGE_ANALYSES_TABLE + VIEWS)
     seed_field_defs(db)
     seed_record_types(db)
+    seed_cottages(db)
     db.commit()
     db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -465,7 +499,9 @@ def patient_of(db, name, row_id):
         "medications": "SELECT patient_id FROM medications WHERE id = ?",
         "measures": "SELECT patient_id FROM measures WHERE id = ?",
         "follow_ups": "SELECT patient_id FROM follow_ups WHERE id = ?",
-    }[name]
+    }.get(name)
+    if not query:  # a cottage belongs to no one patient
+        return None
     row = db.execute(query, (row_id,)).fetchone()
     return row[0] if row else None
 
@@ -577,6 +613,10 @@ def clean_fields(name, fields, creating=False):
             value = 1 if str(value).lower() in ("1", "true", "yes", "on") else 0
         elif field["type"] == "picklist" and value not in ("", None) and value not in options:
             raise ValueError(f"{field['label']} must be one of: {', '.join(options)}")
+        elif field["type"] == "people":  # record IDs, as a list (or written with commas)
+            value = [str(v).strip() for v in (value if isinstance(value, list) else str(value or "").split(",")) if str(v).strip()]
+        elif field["type"] == "date":
+            value = fieldtypes.normalize_date(value)
         else:
             value = "" if value is None else str(value).strip()
         clean[key] = value
@@ -762,7 +802,7 @@ def list_records(name, search="", patient_uid=None, limit=1000, record_type=None
         if patient_uid and "patient_id" in columns:
             where.append("patient_id = ?")
             args.append(patient_uid)
-        order = {"patients": "name COLLATE NOCASE", "documents": "added DESC", "facts": "document_date DESC, section",
+        order = {"patients": "name COLLATE NOCASE", "cottages": "name COLLATE NOCASE", "documents": "added DESC", "facts": "document_date DESC, section",
                  "drafts": "created DESC", "activity": "seq DESC", "medications": "patient, name COLLATE NOCASE",
                  "measures": "patient", "follow_ups": "patient"}[name]
         rows = [dict(r) for r in db.execute(f"SELECT * FROM {view} {'WHERE ' + ' AND '.join(where) if where else ''} "
@@ -775,6 +815,10 @@ def list_records(name, search="", patient_uid=None, limit=1000, record_type=None
         rows.sort(key=lambda r: tuple(-x for x in later(r["date"])))
     elif name == "follow_ups":  # open ones first, soonest due first
         rows.sort(key=lambda r: (r["status"] == "Done", later(r["due"])))
+    elif view == "guardians_view":  # each guardian's town and rough drive time, from their ZIP code
+        for r in rows:
+            found = zipcodes.place(json.loads(r["details"] or "{}").get("zip"))
+            r.update(town=f"{found['town']}, {found['state']}" if found else None, drive_minutes=found and found["minutes"])
     return {"columns": columns, "rows": rows}
 
 
@@ -790,12 +834,28 @@ def get_record(name, uid):
     if name == "patients" and row["record_type"] == "Legal Guardian":
         with connect() as db:
             record["related"]["guardian_of"] = [dict(r) for r in db.execute(
-                "SELECT id, name, placement, dob, status FROM patients_view WHERE guardian_id = ? ORDER BY name", (uid,))]
+                "SELECT id, name, placement, dob, status FROM patients_view WHERE id IN "
+                "(SELECT patient_id FROM guardianships_view WHERE guardian_id = ?) ORDER BY name", (uid,))]
+        record["place"] = zipcodes.place(record["custom"].get("zip"))
         log("opened legal guardian", None, uid)
     elif name == "patients":
+        with connect() as db:
+            record["guardians"] = [{"id": r[0], "name": r[1]} for r in db.execute(
+                "SELECT guardian_id, guardian FROM guardianships_view WHERE patient_id = ? ORDER BY guardian", (uid,))]
         for child in ("documents", "facts", "drafts", "activity", "medications", "measures", "follow_ups"):
             record["related"][child] = list_records(child, patient_uid=uid, limit=500)["rows"]
         log("opened patient", internal(name, uid))
+    elif name == "cottages":
+        with connect() as db:
+            residents = [dict(r) for r in db.execute(
+                "SELECT id, name, dob, gender, status, json_extract(details, '$.admission_date') AS admitted, documents "
+                "FROM patients_view WHERE json_extract(details, '$.cottage') = ? ORDER BY name", (row["name"],))]
+            latest = db.execute("SELECT * FROM cottage_analyses WHERE cottage_id = "
+                                "(SELECT id FROM cottages WHERE uid = ?) ORDER BY id DESC LIMIT 1", (uid,)).fetchone()
+        record["related"]["residents"] = [r for r in residents if r["status"] != "Discharged"]
+        record["related"]["past_residents"] = [r for r in residents if r["status"] == "Discharged"]
+        record["analysis"] = analysis_dict(latest)
+        log("opened cottage", None, f"{uid}: {row['name']}")
     elif name == "documents":
         with connect() as db:
             doc = db.execute("SELECT id, pages FROM documents WHERE uid = ?", (uid,)).fetchone()
@@ -819,7 +879,28 @@ def internal_patient(name, uid):
         return patient_of(db, name, internal_id(db, name, uid))
 
 
-CREATED_BY_HAND = ("patients", "medications", "measures", "follow_ups")
+CREATED_BY_HAND = ("patients", "medications", "measures", "follow_ups", "cottages")
+
+
+def seed_cottages(db):
+    """The Children's Village cottages, the first time (ones deleted later don't come back), as the Cottage choices."""
+    if not db.execute("SELECT COUNT(*) FROM cottages").fetchone()[0]:
+        for name in fieldtypes.COTTAGES:
+            insert(db, "cottages", {"name": name, "created": now()})
+    sync_cottage_options(db)
+
+
+def check_cottage_name(name, uid=None):
+    with connect() as db:
+        if db.execute("SELECT 1 FROM cottages WHERE lower(name) = lower(?) AND uid != ?", (name, uid or "")).fetchone():
+            raise ValueError(f"There's already a cottage called {name}")
+
+
+def sync_cottage_options(db):
+    """A patient's Cottage choices are the cottages' names, A to Z."""
+    names = sorted((r[0] for r in db.execute("SELECT name FROM cottages WHERE name IS NOT NULL AND name != ''")), key=str.lower)
+    db.execute("UPDATE field_defs SET options = ? WHERE object = 'patients' AND name = 'cottage' AND type = 'picklist'",
+               (json.dumps(names),))
 
 
 def person_fields(fields):
@@ -837,23 +918,29 @@ def person_fields(fields):
 
 
 def person_values(db, values, current=None):
-    """Work out a person's full name from first and last, and their guardian's name from the guardian's record."""
+    """Work out a person's full name from first and last."""
     if current is None or "first_name" in values or "last_name" in values:
         first = values.get("first_name", (current or {}).get("first_name"))
         last = values.get("last_name", (current or {}).get("last_name"))
         values["name"] = fieldtypes.full_name(first, last)
         if not values["name"]:
             raise ValueError("Enter a first or last name")
-    # Only a change of guardian touches the name kept with the patient, so a guardian typed in before guardians had
-    # records stays until someone picks the guardian's record
-    if "guardian_uid" in values and (current is None or values["guardian_uid"] != (current.get("guardian_uid") or "")):
-        if values["guardian_uid"]:
-            row = db.execute("SELECT name, record_type FROM patients WHERE uid = ?", (values["guardian_uid"],)).fetchone()
-            if not row or row["record_type"] != "Legal Guardian":
-                raise ValueError("Choose the legal guardian from the list")
-            values["guardian"] = row["name"]
-        else:
-            values["guardian"] = ""
+
+
+def set_guardians(db, patient_id, uids):
+    """Link a patient to exactly these legal guardians (record IDs). Returns their guardians' names before and after."""
+    names = lambda: ", ".join(r[0] for r in db.execute(
+        "SELECT g.name FROM guardianships gs JOIN patients g ON g.id = gs.guardian_id WHERE gs.patient_id = ? ORDER BY g.name",
+        (patient_id,)))
+    before, ids = names(), []
+    for uid in dict.fromkeys(uids):
+        row = db.execute("SELECT id, record_type FROM patients WHERE uid = ?", (uid,)).fetchone()
+        if not row or row["record_type"] != "Legal Guardian":
+            raise ValueError("Choose legal guardians from the list")
+        ids.append(row["id"])
+    db.execute("DELETE FROM guardianships WHERE patient_id = ?", (patient_id,))
+    db.executemany("INSERT INTO guardianships (patient_id, guardian_id) VALUES (?, ?)", [(patient_id, i) for i in ids])
+    return before, names()
 
 
 def person_label(record_type):
@@ -877,8 +964,15 @@ def create_record(name, fields, parent_uid=None):
         with connect() as db:
             person_values(db, values)
         values["created"] = now()
+    guardians = values.pop("guardians", None)
+    if name == "cottages":
+        values["name"] = " ".join(values["name"].split())
+        check_cottage_name(values["name"])
+        values["created"] = now()
     if name == "measures":
         check_measure(values, fields)
+    if name == "medications" and values.get("name"):  # "zoloft" -> "Sertraline", so a medication is listed one way
+        values["name"] = fieldtypes.canonical_medication(values["name"])
     if name == "medications" and fields.get("source"):  # where a medication suggested from the records was found
         values["source"] = str(fields["source"])[:300]
     type_field = fieldtypes.RECORD_TYPE_FIELD.get(name)
@@ -892,7 +986,11 @@ def create_record(name, fields, parent_uid=None):
                 raise ValueError("Choose the patient this is for")
             values["patient_id"] = internal_id(db, "patients", parent_uid)
         row_id, uid = insert(db, name, values)
-        patient_id = row_id if name == "patients" else values["patient_id"]
+        patient_id = row_id if name == "patients" else values.get("patient_id")
+        if guardians:
+            set_guardians(db, row_id, guardians)
+        if name == "cottages":
+            sync_cottage_options(db)
     title = values.get(OBJECTS[name]["title_field"]) or ""
     label = person_label(values["record_type"]) if name == "patients" else OBJECTS[name]["label"].lower()
     log(f"created {label}", patient_id, uid if name == "patients" else f"{uid}: {title}")
@@ -927,18 +1025,23 @@ def update_record(name, uid, fields):
     if name == "patients":
         fields = person_fields(fields)
     values = clean_fields(name, fields)
+    if name == "medications" and values.get("name"):
+        values["name"] = fieldtypes.canonical_medication(values["name"])
+    if name == "cottages" and values.get("name"):
+        values["name"] = " ".join(values["name"].split())
+        check_cottage_name(values["name"], uid)
     custom_changes = {}
     with connect() as db:
         row_id = internal_id(db, name, uid)
         current = dict(db.execute(f"SELECT * FROM {name} WHERE id = ?", (row_id,)).fetchone())
         if name == "patients":
-            if values.get("guardian_uid") == uid:
-                raise ValueError("Someone can't be their own legal guardian")
             person_values(db, values, current)
+    guardians, guardian_change = values.pop("guardians", None), None
     if name in fieldtypes.RECORD_TYPE_FIELD:
         record_type = values.get(fieldtypes.RECORD_TYPE_FIELD[name]) or current[fieldtypes.RECORD_TYPE_FIELD[name]]
         incoming = {**{k: v for k, v in fields.items() if k not in values and k != "custom"}, **(fields.get("custom") or {})}
         stored = json.loads(current.get("custom") or "{}")
+        incoming = {k: v for k, v in incoming.items() if k not in stored or stored[k] != v}  # untouched values aren't re-checked
         blank = lambda d: fieldtypes.coerce(d, "")
         definitions = {d["name"]: d for d in definitions_for(name, record_type)}
         for key, value in clean_custom(name, record_type, incoming).items():
@@ -950,13 +1053,19 @@ def update_record(name, uid, fields):
             values["custom"] = json.dumps(stored)
     with connect() as db:
         values = {k: v for k, v in values.items() if (current.get(k) if current.get(k) is not None else "") != v}
-        if not values:
+        if guardians is not None:
+            before, after = set_guardians(db, row_id, guardians)
+            guardian_change = (before, after) if before != after else None
+        if not values and not guardian_change:
             return
         if name == "facts":
             values["edited"] = now()
-        db.execute(f"UPDATE {name} SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?", (*values.values(), row_id))
-        if name == "patients" and "name" in values:  # a guardian's new name shows on their patients' records too
-            db.execute("UPDATE patients SET guardian = ? WHERE guardian_uid = ?", (values["name"], uid))
+        if values:
+            db.execute(f"UPDATE {name} SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?", (*values.values(), row_id))
+        if name == "cottages" and "name" in values:  # its residents move with it
+            db.execute("UPDATE patients SET custom = json_set(custom, '$.cottage', ?) WHERE json_extract(custom, '$.cottage') = ?",
+                       (values["name"], current["name"]))
+            sync_cottage_options(db)
         patient_id = patient_of(db, name, row_id)
         if name == "documents" and values.get("document_type"):
             learn_type(db, row_id, values["document_type"])  # a correction teaches MindChart too
@@ -969,7 +1078,8 @@ def update_record(name, uid, fields):
     short = lambda v: fieldtypes.display(v)[:120]
     changed = "; ".join([f"{labels[k]}: {short(current.get(k))} → {short(v)}" for k, v in values.items()
                          if k not in ("edited", "custom")] +
-                        [f"{labels[k]}: {short(old)} → {short(new)}" for k, (old, new) in custom_changes.items()])
+                        [f"{labels[k]}: {short(old)} → {short(new)}" for k, (old, new) in custom_changes.items()] +
+                        ([f"legal guardians: {short(guardian_change[0])} → {short(guardian_change[1])}"] if guardian_change else []))
     label = person_label(values.get("record_type") or current["record_type"]) if name == "patients" else OBJECTS[name]["label"].lower()
     log(f"edited {label}", patient_id, f"{uid}: {changed}")
 
@@ -984,13 +1094,140 @@ def delete_record(name, uid):
         label = OBJECTS[name]["label"].lower()
         if name == "patients":
             label = person_label(db.execute("SELECT record_type FROM patients WHERE id = ?", (row_id,)).fetchone()[0])
-            db.execute("UPDATE patients SET guardian_uid = NULL, guardian = '' WHERE guardian_uid = ?", (uid,))
         db.execute(f"DELETE FROM {name} WHERE id = ?", (row_id,))
+        if name == "cottages":
+            sync_cottage_options(db)  # its residents keep the name, shown as no longer on the list
     # A deleted patient's own ID can't be linked any more, so their name goes in the detail.
     log(f"deleted {label}", None if name == "patients" else patient_id, f"{uid}: {title}")
     if name in ("patients", "documents"):
         with connect() as db:
             db.execute("VACUUM")  # rewrite the database so deleted records don't linger in free space
+
+
+COTTAGE_SECTIONS = ("risk", "social", "trauma", "substance", "hpi", "legal")  # what bears on how youths get along
+
+
+def cottage_inputs(uid, facts_each=12, notes_each=2):
+    """What the AI reads to describe a cottage's dynamics: each current resident's age, gender, admission, current
+    medications and latest scores, their most recent facts in the sections that bear on how youths get along, and
+    their latest clinician notes. Everything the AI may cite is numbered."""
+    record = get_record("cottages", uid)
+    today, residents, facts = datetime.date.today(), [], []
+    with connect() as db:
+        for r in record["related"]["residents"]:
+            patient_id = internal_id(db, "patients", r["id"])
+            born = fieldtypes.parse_date(r["dob"])
+            age = today.year - born.year - ((today.month, today.day) < (born.month, born.day)) if born else None
+            meds = [f"{m[0]} {m[1] or ''}".strip() for m in db.execute(
+                "SELECT name, dose FROM medications WHERE patient_id = ? AND status = 'Active' ORDER BY name", (patient_id,))]
+            scores = [f"{m[0]} {m[1]} ({m[2]})" for m in db.execute(
+                "SELECT measure, score, date FROM measures WHERE patient_id = ? AND measure != 'Vitals' AND score IS NOT NULL "
+                "ORDER BY id DESC LIMIT 3", (patient_id,))]
+            found = db.execute(
+                f"SELECT f.fact, f.date, d.name AS document, d.document_date FROM facts f JOIN documents d ON d.id = f.document_id "
+                f"WHERE d.patient_id = ? AND f.section IN ({','.join('?' * len(COTTAGE_SECTIONS))}) ORDER BY d.id DESC, f.id LIMIT ?",
+                (patient_id, *COTTAGE_SECTIONS, facts_each)).fetchall()
+            notes = db.execute("SELECT name, document_date, pages FROM documents WHERE patient_id = ? AND kind = 'Note' "
+                               "ORDER BY id DESC LIMIT ?", (patient_id, notes_each)).fetchall()
+            numbers = []
+            for f in found:
+                facts.append({"resident": r["name"], "resident_id": r["id"], "fact": f["fact"], "document": f["document"],
+                              "date": f["date"] or f["document_date"] or ""})
+                numbers.append(len(facts))
+            for n in notes:
+                text = " ".join(p["text"] for p in json.loads(n["pages"] or "[]"))[:500]
+                facts.append({"resident": r["name"], "resident_id": r["id"], "fact": f"Clinician note: {text}", "document": n["name"],
+                              "date": n["document_date"] or ""})
+                numbers.append(len(facts))
+            residents.append({"name": r["name"], "id": r["id"], "age": age, "gender": r["gender"] or "", "admitted": r["admitted"] or "",
+                              "medications": meds, "scores": scores, "facts": numbers})
+    return {"cottage": record["record"]["name"], "residents": residents, "facts": facts}
+
+
+def intercottage_inputs(facts_each=8):
+    """What the AI reads to compare the cottages: each cottage's current residents (age, gender), and the facts and notes
+    in which a resident's records name a resident of a different cottage."""
+    cottages, everyone, facts = [], [], []
+    today = datetime.date.today()
+    with connect() as db:
+        for c in db.execute("SELECT uid, name FROM cottages ORDER BY name COLLATE NOCASE").fetchall():
+            residents = []
+            for r in db.execute("SELECT id, name, first_name, dob, gender FROM patients_view WHERE COALESCE(status, '') != 'Discharged' "
+                                "AND json_extract(details, '$.cottage') = ? ORDER BY name", (c["name"],)):
+                born = fieldtypes.parse_date(r["dob"])
+                age = today.year - born.year - ((today.month, today.day) < (born.month, born.day)) if born else None
+                residents.append({"name": r["name"], "id": r["id"], "first": (r["first_name"] or r["name"]).split()[0], "age": age,
+                                  "gender": r["gender"] or ""})
+            if residents:
+                cottages.append({"name": c["name"], "residents": residents})
+                everyone += [(c["name"], r) for r in residents]
+        for cottage, r in everyone:
+            others = {o["first"]: (other_cottage, o) for other_cottage, o in everyone if other_cottage != cottage and len(o["first"]) > 2}
+            if not others:
+                continue
+            mentions = re.compile(r"\b(" + "|".join(re.escape(name) for name in others) + r")\b")
+            texts = [(f["fact"], f["document"], f["date"]) for f in db.execute(
+                "SELECT f.fact, d.name AS document, COALESCE(f.date, d.document_date) AS date FROM facts f "
+                "JOIN documents d ON d.id = f.document_id JOIN patients p ON p.id = d.patient_id WHERE p.uid = ?", (r["id"],))]
+            texts += [("Clinician note: " + " ".join(page["text"] for page in json.loads(n["pages"] or "[]")), n["name"], n["document_date"])
+                      for n in db.execute("SELECT d.name, d.document_date, d.pages FROM documents d JOIN patients p ON p.id = d.patient_id "
+                                          "WHERE p.uid = ? AND d.kind = 'Note'", (r["id"],))]
+            for text, document, date in [x for x in texts if mentions.search(x[0])][:facts_each]:
+                facts.append({"resident": r["name"], "resident_id": r["id"], "fact": text[:600], "document": document, "date": date or ""})
+    return {"cottages": cottages, "facts": facts}
+
+
+def save_cottage_analysis(uid, result, model):
+    """Keep an analysis of one cottage (uid) or of all of them (uid None). Returns its number, for feedback."""
+    with connect() as db:
+        cursor = db.execute("INSERT INTO cottage_analyses (cottage_id, created, model, result) VALUES (?, ?, ?, ?)",
+                            (internal_id(db, "cottages", uid) if uid else None, now(), model, json.dumps(result)))
+    log("analyzed cottage dynamics" if uid else "analyzed dynamics across cottages", None, uid or "")
+    return cursor.lastrowid
+
+
+def analysis_dict(row):
+    if not row:
+        return None
+    return {**json.loads(row["result"]), "id": row["id"], "created": row["created"], "model": row["model"],
+            "feedback": json.loads(row["feedback"]) if row["feedback"] else None}
+
+
+def intercottage_analysis():
+    with connect() as db:
+        return analysis_dict(db.execute("SELECT * FROM cottage_analyses WHERE cottage_id IS NULL ORDER BY id DESC LIMIT 1").fetchone())
+
+
+def save_analysis_feedback(analysis_id, rating, comment):
+    """The clinician's view of an analysis: "helpful" or "not helpful", and anything to do differently next time."""
+    if rating not in ("helpful", "not helpful"):
+        raise ValueError("Choose Helpful or Not helpful")
+    with connect() as db:
+        if not db.execute("SELECT 1 FROM cottage_analyses WHERE id = ?", (analysis_id,)).fetchone():
+            raise ValueError("That analysis isn't there any more")
+        db.execute("UPDATE cottage_analyses SET feedback = ? WHERE id = ?",
+                   (json.dumps({"rating": rating, "comment": " ".join(str(comment or "").split())[:1000], "at": now()}), analysis_id))
+    log("gave feedback on a cottage analysis", None, f"{rating}")
+
+
+def analysis_feedback(limit=6):
+    """Recent feedback with a comment, newest first, to guide the next analyses."""
+    with connect() as db:
+        rows = db.execute("SELECT feedback FROM cottage_analyses WHERE feedback IS NOT NULL ORDER BY id DESC").fetchall()
+    found = [json.loads(r[0]) for r in rows]
+    return [f for f in found if f.get("comment")][:limit]
+
+
+def medication_names():
+    """The medications to offer when adding one: the catalog, plus any other name already on someone's list,
+    each with how many patients are on it now."""
+    with connect() as db:
+        active = dict(db.execute("SELECT name, COUNT(DISTINCT patient_id) FROM medications WHERE status = 'Active' GROUP BY name"))
+        used = [r[0] for r in db.execute("SELECT DISTINCT name FROM medications WHERE name IS NOT NULL AND name != '' ORDER BY name")]
+    catalog = fieldtypes.medication_catalog()
+    known = {m["name"].lower() for m in catalog}
+    added = [{"name": n, "brands": [], "category": "Added in MindChart"} for n in used if n.lower() not in known]
+    return [{**m, "patients": active.get(m["name"], 0)} for m in catalog + added]
 
 
 def patients_for_assistant():
@@ -1013,7 +1250,7 @@ def add_note(patient_uid, text, date="", author="", title=""):
     """A note typed or dictated into MindChart. It's a document like any other, so its facts feed future drafts."""
     if not text.strip():
         raise ValueError("The note is empty")
-    date = date.strip() or datetime.date.today().strftime("%m/%d/%Y")
+    date = fieldtypes.normalize_date(date) or datetime.date.today().strftime("%m/%d/%Y")
     with connect() as db:
         patient_id = internal_id(db, "patients", patient_uid)
         _, uid = insert(db, "documents", {
@@ -1110,7 +1347,7 @@ def confirm_upload(uid, choice):
         patient_id = internal_id(db, "patients", patient_uid)
         row_id, doc_uid = insert(db, "documents", {
             "patient_id": patient_id, "name": upload["name"], "kind": "File", "document_type": document_type,
-            "document_date": str(choice.get("document_date") or "").strip(), "author": str(choice.get("author") or "").strip(),
+            "document_date": fieldtypes.normalize_date(choice.get("document_date")), "author": str(choice.get("author") or "").strip(),
             "added": now(), "original": upload["original"], "pages": json.dumps(upload["pages"]),
             "read_state": "queued" if wants_reading else None, "pull": json.dumps(pull)})
         learn_type(db, row_id, document_type)
@@ -1479,3 +1716,51 @@ def upgrade_to_v6(db):
 
 
 MIGRATIONS[6] = upgrade_to_v6
+
+
+def upgrade_to_v7(db):
+    """Version 7: a patient can have several legal guardians (and a guardian several patients), so the links move to
+    a table of their own. And dates typed another way (such as "12271994") are written MM/DD/YYYY, like dates picked
+    from the calendar; dates written only partly (such as "2019", as records often put them) stay as they are.
+    Medications typed by a brand name ("zoloft") take the name the medication list uses ("Sertraline"). And a patient's
+    cottage becomes a choice from the Children's Village cottages: typed names that match one take its spelling, and
+    any others stay as typed until someone picks one."""
+    db.execute(GUARDIANSHIPS_TABLE)
+    if {r[1] for r in db.execute("PRAGMA table_info(medications)")}:
+        for r in db.execute("SELECT id, name FROM medications").fetchall():
+            if r["name"] and fieldtypes.canonical_medication(r["name"]) != r["name"]:
+                db.execute("UPDATE medications SET name = ? WHERE id = ?", (fieldtypes.canonical_medication(r["name"]), r["id"]))
+    if "guardian_uid" in {r[1] for r in db.execute("PRAGMA table_info(patients)")}:
+        db.execute("INSERT OR IGNORE INTO guardianships (patient_id, guardian_id) SELECT p.id, g.id FROM patients p "
+                   "JOIN patients g ON g.uid = p.guardian_uid AND g.record_type = 'Legal Guardian'")
+        # Those patients' guardian names came from the link, which the table now holds
+        db.execute("UPDATE patients SET guardian = '' WHERE COALESCE(guardian_uid, '') != ''")
+    db.execute("UPDATE field_defs SET type = 'picklist', options = ? WHERE object = 'patients' AND name = 'cottage' AND type = 'text'",
+               (json.dumps(fieldtypes.COTTAGES),))
+    spelling = {c.lower(): c for c in fieldtypes.COTTAGES}
+    for r in db.execute("SELECT id, custom FROM patients WHERE custom LIKE '%\"cottage\"%'").fetchall():
+        custom = json.loads(r["custom"])
+        typed = str(custom.get("cottage") or "").strip()
+        if spelling.get(typed.lower(), typed) != custom.get("cottage"):
+            custom["cottage"] = spelling.get(typed.lower(), typed)
+            db.execute("UPDATE patients SET custom = ? WHERE id = ?", (json.dumps(custom), r["id"]))
+    custom_dates = {}
+    for r in db.execute("SELECT object, name FROM field_defs WHERE type = 'date'"):
+        custom_dates.setdefault(r["object"], set()).add(r["name"])
+    for table, spec in OBJECTS.items():
+        columns = {r[1] for r in db.execute(f"PRAGMA table_info({table})")}
+        dates = [f["name"] for f in spec["fields"] if f["type"] == "date" and f["name"] in columns]
+        own = custom_dates.get(table, set()) if "custom" in columns else set()
+        if not dates and not own:
+            continue
+        for row in db.execute(f"SELECT {', '.join(['id', *dates, *(['custom'] if own else [])])} FROM {table}").fetchall():
+            changes = {c: fieldtypes.normalize_date(row[c]) for c in dates if row[c] and fieldtypes.normalize_date(row[c]) != row[c]}
+            custom = json.loads(row["custom"] or "{}") if own else {}
+            tidied = {k: fieldtypes.normalize_date(v) for k, v in custom.items() if k in own and isinstance(v, str) and v}
+            if any(custom[k] != v for k, v in tidied.items()):
+                changes["custom"] = json.dumps({**custom, **tidied})
+            if changes:
+                db.execute(f"UPDATE {table} SET {', '.join(f'{c} = ?' for c in changes)} WHERE id = ?", (*changes.values(), row["id"]))
+
+
+MIGRATIONS[7] = upgrade_to_v7

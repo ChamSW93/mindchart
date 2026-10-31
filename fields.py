@@ -10,7 +10,7 @@ by field name, so changing a type never changes the database's layout.
 import datetime
 import re
 
-FIELD_TYPES = ["text", "longtext", "number", "date", "datetime", "checkbox", "picklist", "multipicklist"]
+FIELD_TYPES = ["text", "longtext", "number", "date", "datetime", "checkbox", "picklist", "multipicklist", "zip"]
 
 # The field that holds each object's record type.
 RECORD_TYPE_FIELD = {"patients": "record_type", "documents": "document_type", "measures": "measure"}
@@ -34,12 +34,15 @@ PLACEMENT_FIELDS = {
     "Outpatient / community": ["clinic", "referral_source"],
 }
 PLACEMENTS = list(PLACEMENT_FIELDS)
+# The Children's Village cottages and programs, A to Z
+COTTAGES = sorted(["Rose", "Collins", "Smith", "Crest", "Fanshaw", "Kendall", "Howard", "Van Horn", "Dwight", "Williams",
+                   "Butler", "Minturn", "JRIC", "NEST", "AOBH"], key=str.lower)
 GENDERS = ["Male", "Female", "X"]
 
 DEFAULT_RECORD_TYPES = {
     "patients": {
         "Patient": [
-            field("cottage", "Cottage / unit"),
+            field("cottage", "Cottage / unit", "picklist", COTTAGES),
             field("admission_date", "Admission date", "date"),
             field("expected_discharge", "Expected discharge", "date"),
             field("program", "Program", "picklist", ["Crisis residence", "21-day stabilization", "60-day stabilization", "Other"]),
@@ -58,6 +61,7 @@ DEFAULT_RECORD_TYPES = {
             field("phone", "Phone"),
             field("email", "Email"),
             field("address", "Address", "longtext"),
+            field("zip", "ZIP code", "zip"),  # gives their town and a rough drive time from Children's Village
         ],
     },
     "documents": {
@@ -201,6 +205,33 @@ def parse_date(text):
         return None
 
 
+def normalize_date(text):
+    """A date as MindChart writes it (MM/DD/YYYY, as the calendar fills it in), when it was typed another way that
+    can only mean one date: "12271994", "122794", "12-27-94", "1994-12-27" or "Dec 27, 1994". Anything else, such
+    as "2019" or "March 2019" (as records often put it), is kept as written."""
+    raw = str(text or "").strip()
+    typed = " ".join(raw.split())
+    digits = re.fullmatch(r"(\d{2})(\d{2})(\d{4}|\d{2})", typed)  # MMDDYYYY or MMDDYY
+    m = re.fullmatch(r"(\d{1,2})[/. -](\d{1,2})[/. -](\d{4}|\d{2})", "/".join(digits.groups()) if digits else typed)
+    if m:
+        month, day, year = map(int, m.groups())
+        if len(m.group(3)) == 2:  # the century that puts it nearest today, so "94" is 1994 and a due date in "27" is 2027
+            this_year = datetime.date.today().year
+            year = min((century + year for century in (this_year // 100 * 100 - 100, this_year // 100 * 100, this_year // 100 * 100 + 100)),
+                       key=lambda y: abs(y - this_year))
+    elif re.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}|[A-Za-z]{3,}\.? \d{1,2}(st|nd|rd|th)?,? \d{4}|\d{1,2}(st|nd|rd|th)? [A-Za-z]{3,}\.?,? \d{4}", typed):
+        found = parse_date(typed)
+        if not found:
+            return raw
+        month, day, year = found.month, found.day, found.year
+    else:
+        return raw
+    try:
+        return datetime.date(year, month, day).strftime("%m/%d/%Y")
+    except ValueError:  # no such day (13/45/2020): kept as typed, for a person to correct
+        return raw
+
+
 def date_key(text):
     """For putting dates in order, including partial ones: (year, month, day), with 0 for what isn't known.
     "03/04/2019" -> (2019, 3, 4); "March 2019" -> (2019, 3, 0); "in 2018" -> (2018, 0, 0); "age 7" -> None."""
@@ -246,6 +277,13 @@ def coerce(definition, value):
             if match not in chosen:
                 chosen.append(match)
         return chosen
+    if kind == "date":
+        return normalize_date(value)
+    if kind == "zip":
+        code = str(value).strip()
+        if not re.fullmatch(r"\d{5}(-\d{4})?", code):
+            raise ValueError(f"{label} must be a 5-digit ZIP code")
+        return code
     return str(value).strip()
 
 
@@ -290,3 +328,66 @@ def normalize_gender(value):
     known = {"m": "Male", "male": "Male", "boy": "Male", "man": "Male", "f": "Female", "female": "Female", "girl": "Female",
              "woman": "Female", "x": "X", "nonbinary": "X", "non-binary": "X", "non binary": "X"}
     return known.get(text.lower(), text)
+
+
+# --- Medications -------------------------------------------------------------------
+# Medications commonly used in child and adolescent psychiatry and general care, offered when adding one (any other
+# name can be typed too). Each is (name, brand names); a brand name typed in is saved as the medication's name.
+MEDICATIONS = {
+    "ADHD": [("Methylphenidate", ["Ritalin", "Concerta", "Metadate", "Quillichew", "Jornay PM"]),
+             ("Dexmethylphenidate", ["Focalin", "Focalin XR"]), ("Methylphenidate patch", ["Daytrana"]),
+             ("Mixed amphetamine salts", ["Adderall", "Adderall XR", "Mydayis"]), ("Lisdexamfetamine", ["Vyvanse"]),
+             ("Dextroamphetamine", ["Dexedrine", "Zenzedi"]), ("Atomoxetine", ["Strattera"]), ("Viloxazine", ["Qelbree"]),
+             ("Guanfacine", ["Tenex"]), ("Guanfacine ER", ["Intuniv"]), ("Clonidine", ["Catapres"]), ("Clonidine ER", ["Kapvay"])],
+    "Antidepressant": [("Sertraline", ["Zoloft"]), ("Fluoxetine", ["Prozac"]), ("Escitalopram", ["Lexapro"]),
+                       ("Citalopram", ["Celexa"]), ("Fluvoxamine", ["Luvox"]), ("Paroxetine", ["Paxil"]),
+                       ("Bupropion", ["Wellbutrin", "Wellbutrin XL"]), ("Venlafaxine", ["Effexor XR"]),
+                       ("Duloxetine", ["Cymbalta"]), ("Desvenlafaxine", ["Pristiq"]), ("Mirtazapine", ["Remeron"]),
+                       ("Trazodone", ["Desyrel"]), ("Vilazodone", ["Viibryd"]), ("Vortioxetine", ["Trintellix"]),
+                       ("Amitriptyline", ["Elavil"]), ("Nortriptyline", ["Pamelor"]), ("Clomipramine", ["Anafranil"]),
+                       ("Imipramine", ["Tofranil"])],
+    "Antipsychotic": [("Aripiprazole", ["Abilify", "Abilify Maintena"]), ("Risperidone", ["Risperdal"]),
+                      ("Quetiapine", ["Seroquel", "Seroquel XR"]), ("Olanzapine", ["Zyprexa"]), ("Ziprasidone", ["Geodon"]),
+                      ("Lurasidone", ["Latuda"]), ("Paliperidone", ["Invega"]), ("Brexpiprazole", ["Rexulti"]),
+                      ("Cariprazine", ["Vraylar"]), ("Asenapine", ["Saphris"]), ("Haloperidol", ["Haldol"]),
+                      ("Chlorpromazine", ["Thorazine"]), ("Clozapine", ["Clozaril"])],
+    "Mood stabilizer": [("Lithium", ["Lithobid"]), ("Divalproex", ["Depakote", "Depakote ER"]), ("Valproic acid", ["Depakene"]),
+                        ("Lamotrigine", ["Lamictal"]), ("Oxcarbazepine", ["Trileptal"]), ("Carbamazepine", ["Tegretol"]),
+                        ("Topiramate", ["Topamax"])],
+    "Anxiety, sleep and agitation": [("Hydroxyzine", ["Vistaril", "Atarax"]), ("Buspirone", ["Buspar"]),
+                                     ("Propranolol", ["Inderal"]), ("Prazosin", ["Minipress"]), ("Melatonin", []),
+                                     ("Diphenhydramine", ["Benadryl"]), ("Lorazepam", ["Ativan"]), ("Clonazepam", ["Klonopin"]),
+                                     ("Diazepam", ["Valium"]), ("Alprazolam", ["Xanax"]), ("Gabapentin", ["Neurontin"])],
+    "Other psychiatric": [("Naltrexone", ["Revia", "Vivitrol"]), ("Benztropine", ["Cogentin"]), ("Nicotine patch", ["NicoDerm CQ"]),
+                          ("Nicotine gum", ["Nicorette"]), ("N-acetylcysteine", ["NAC"]), ("Desmopressin", ["DDAVP"])],
+    "General care": [("Acetaminophen", ["Tylenol"]), ("Ibuprofen", ["Advil", "Motrin"]), ("Naproxen", ["Aleve"]),
+                     ("Albuterol inhaler", ["ProAir", "Ventolin"]), ("Fluticasone inhaler", ["Flovent"]),
+                     ("Budesonide-formoterol inhaler", ["Symbicort"]), ("Montelukast", ["Singulair"]),
+                     ("Cetirizine", ["Zyrtec"]), ("Loratadine", ["Claritin"]), ("Fexofenadine", ["Allegra"]),
+                     ("Fluticasone nasal spray", ["Flonase"]), ("Epinephrine auto-injector", ["EpiPen", "Auvi-Q"]),
+                     ("Amoxicillin", ["Amoxil"]), ("Azithromycin", ["Zithromax"]), ("Cephalexin", ["Keflex"]),
+                     ("Metformin", ["Glucophage"]), ("Insulin", ["Humalog", "Lantus", "Novolog"]),
+                     ("Levothyroxine", ["Synthroid"]), ("Omeprazole", ["Prilosec"]), ("Famotidine", ["Pepcid"]),
+                     ("Ondansetron", ["Zofran"]), ("Polyethylene glycol", ["MiraLAX"]), ("Docusate", ["Colace"]),
+                     ("Ferrous sulfate (iron)", ["Feosol"]), ("Vitamin D", []), ("Multivitamin", []),
+                     ("Hydrocortisone cream", ["Cortaid"]), ("Mupirocin ointment", ["Bactroban"]),
+                     ("Benzoyl peroxide", ["PanOxyl"]), ("Tretinoin", ["Retin-A"]),
+                     ("Levonorgestrel-ethinyl estradiol", ["Alesse", "Aviane"]), ("Medroxyprogesterone injection", ["Depo-Provera"])],
+}
+
+
+def medication_catalog():
+    """[{"name", "brands", "category"}] for every medication above."""
+    return [{"name": name, "brands": brands, "category": category}
+            for category, entries in MEDICATIONS.items() for name, brands in entries]
+
+
+def canonical_medication(name):
+    """A medication's name as the catalog writes it, when what was typed is one of its names or brand names
+    ("zoloft" or "Methylphenidate (Ritalin)"). Anything else is kept as typed, as a new medication."""
+    typed = " ".join(str(name or "").split())
+    bare = re.sub(r"\s*\([^)]*\)\s*$", "", typed).lower()  # "Methylphenidate (Ritalin)" -> "methylphenidate"
+    for entry in medication_catalog():
+        if typed.lower() == entry["name"].lower() or bare == entry["name"].lower() or typed.lower() in (b.lower() for b in entry["brands"]):
+            return entry["name"]
+    return typed

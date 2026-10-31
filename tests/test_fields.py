@@ -59,6 +59,23 @@ class DatesAndScores(unittest.TestCase):
         self.assertEqual(fields.measure_band("Vitals", 100), "")
 
 
+class TypedDates(unittest.TestCase):
+    def test_dates_typed_any_clear_way_become_mm_dd_yyyy(self):
+        for typed in ("12271994", "122794", "12/27/94", "12-27-1994", "12 27 1994", "1994-12-27", "Dec 27 1994", "27 December 1994"):
+            self.assertEqual(fields.normalize_date(typed), "12/27/1994", typed)
+        self.assertEqual(fields.normalize_date("1/5/2024"), "01/05/2024")
+        for kept in ("2019", "March 2019", "13/45/2020", "", "spring"):  # partial or impossible dates stay as written
+            self.assertEqual(fields.normalize_date(kept), kept)
+
+
+class MedicationCatalog(unittest.TestCase):
+    def test_brand_names_become_the_medications_name(self):
+        self.assertEqual(fields.canonical_medication("zoloft"), "Sertraline")
+        self.assertEqual(fields.canonical_medication("Methylphenidate (Ritalin)"), "Methylphenidate")
+        self.assertEqual(fields.canonical_medication("Intuniv"), "Guanfacine ER")
+        self.assertEqual(fields.canonical_medication("Something New"), "Something New")
+
+
 class Names(unittest.TestCase):
     def test_full_names_split_into_first_and_last(self):
         self.assertEqual(fields.split_name("Jordan Avery"), ("Jordan", "Avery"))

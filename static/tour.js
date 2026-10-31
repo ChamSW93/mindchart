@@ -41,6 +41,16 @@ const HELP = {
     ["One guardian, several patients", "Siblings can share a guardian. Each guardian's page lists the patients they're responsible for."],
     ["Patients and guardians", "Both are people in MindChart, with a record type of Patient or Legal Guardian. Guardians have IDs starting LG-, patients PT-."],
   ] },
+  "list:cottages": { title: "Cottages", intro: "The Children's Village cottages and who lives in each.", items: [
+    ["Residents", "Each cottage lists the patients whose Cottage is set to it (on a patient's page: Edit, then Residential treatment details)."],
+    ["+ New cottage", "Add one, or rename one from its page; patients' Cottage choices follow, and renaming moves its residents with it."],
+    ["Dynamics across cottages (experimental)", "The AI compares the cottages and points out what the records say about residents of different cottages together, citing each record. Check it against the records, and tell it what helped or didn't: your feedback guides the next analyses."],
+  ] },
+  "record:cottages": { title: "A cottage's page", intro: "One cottage, its residents, and how they're doing together.", items: [
+    ["Residents", "Current residents, with past ones underneath."],
+    ["Cottage dynamics (experimental)", "The AI reads the residents' records (risk, social, trauma and substance use facts, recent notes, medications and scores) and writes a short briefing: shared themes, what's recorded between residents, and what to watch for. Every point links to the records it comes from. It's not a clinical assessment."],
+    ["Feedback", "Mark an analysis Helpful or Not helpful and say what was right, wrong or missing. MindChart passes your recent comments to the AI next time."],
+  ] },
   "record:guardians": { title: "A guardian's page", intro: "One legal guardian and the patients they're responsible for.", items: [
     ["Edit", "Change their name, relationship or contact details. A new name shows on their patients' pages too."],
     ["Guardian of", "The patients linked to them. To link another, open that patient, click Edit, and choose this guardian under Legal guardian."],

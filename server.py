@@ -33,6 +33,7 @@ import touchid
 import updater
 import vault
 import worker
+import zipcodes
 
 APP_NAME = "MindChart"  # the name shown in the app; change it here to rename the app
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -365,6 +366,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
             model, thinking = model_choice(data)
             vault.internal("patients", args[0])  # the patient must exist
             return history.draft_visit_note(model, thinking, data.get("inputs", ""))
+        if is_("POST", "cottages", "*", "analyze"):  # the AI's (experimental) reading of how a cottage's residents get along
+            model, thinking = model_choice(data)
+            with worker.paused():  # the model is busy with this
+                result = history.analyze_cottage(model, thinking, vault.cottage_inputs(args[0]), vault.analysis_feedback())
+            number = vault.save_cottage_analysis(args[0], result, model)
+            return {**result, "id": number, "created": vault.now(), "model": model, "feedback": None}
+        if is_("POST", "cottages", "analyze"):  # the same across all the cottages
+            model, thinking = model_choice(data)
+            with worker.paused():
+                result = history.analyze_cottages(model, thinking, vault.intercottage_inputs(), vault.analysis_feedback())
+            number = vault.save_cottage_analysis(None, result, model)
+            return {**result, "id": number, "created": vault.now(), "model": model, "feedback": None}
+        if is_("GET", "cottages", "analysis"):
+            return {"analysis": vault.intercottage_analysis()}
+        if is_("POST", "cottage-analyses", "*", "feedback"):
+            vault.save_analysis_feedback(int(args[0]), data.get("rating"), data.get("comment", ""))
+            return {}
+        if is_("GET", "medication-names"):  # offered when adding a medication
+            return {"medications": vault.medication_names()}
+        if is_("GET", "zip"):  # ZIP codes and towns, worked out on this Mac
+            return {"results": zipcodes.search(query.get("q", "")), "home": zipcodes.HOME_NAME}
         if is_("GET", "coming-up"):
             return {"items": vault.coming_up()}
         if is_("POST", "patients", "*", "history"):

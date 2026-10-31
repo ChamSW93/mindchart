@@ -38,10 +38,12 @@ Nothing is sent over the internet. Updates download code only, and never upload 
 - **Wrong-patient checks.** Each upload is matched to patients by name, date of birth and MRN. A file dropped on one patient's page that names a different child (a sibling, say) gets a warning before it can be filed.
 - **Uploads and learning stay in the encrypted store.** Files waiting for review are kept inside the encrypted store, and a discarded upload is wiped from it. The examples MindChart learns document types from (each confirmed document's type and opening text) are kept there too, are deleted along with their document, and never leave the Mac.
 - **Background reading doesn't keep records open.** Reading confirmed documents in the background doesn't count as activity, so MindChart still locks itself after 15 minutes alone. Reading pauses while locked.
+- **Addresses stay on the Mac.** A guardian's town and drive time come from a ZIP code table built into MindChart; no address or ZIP code is looked up online.
+- **Cottage briefings are experimental and advisory.** The AI reads several residents' records together, on the Mac, and every point must cite a record or it's dropped. Briefings are labelled experimental and not a clinical assessment; feedback on them stays in the encrypted store.
 - **Error logs contain no record contents.** `~/Library/Logs/MindChart` records what failed and where in the code, so it's safe to send to the developer.
 - **Updates are code-only and verified.** Updates download from GitHub over HTTPS, are checked against a published SHA-256 checksum, replace only the app's files, and never touch the encrypted store. They never upload anything.
 - **Deleting is thorough.** Deleting a patient removes their documents, facts and drafts, and the database is rewritten so deleted records don't linger in free space.
-- **Tested before every release.** An automated test suite (122 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
+- **Tested before every release.** An automated test suite (134 tests) runs on a clean Mac with Apple's built-in Python, and on the developer's Mac before anything is published. Publishing is blocked if any test fails.
 
 ## What the organization is responsible for
 

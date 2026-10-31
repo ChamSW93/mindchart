@@ -78,15 +78,15 @@ class Assistant(unittest.TestCase):
     def test_new_patient_with_record_type_fields(self):
         self.replies = [{"intent": "new_patient", "explanation": "New patient.", "patient_fields": {
             **{f: "" for f in assistant.PATIENT_FIELDS}, "name": "Maria Test (fictional)",
-            "record_type": "Residential treatment", "cottage": "Cottage 4", "program": "Other"}}]
-        proposal = assistant.handle("New patient Maria, Cottage 4", "m", False, "MindChart")
-        self.assertEqual(proposal["fields"]["cottage"], "Cottage 4")
+            "record_type": "Residential treatment", "cottage": "collins", "program": "Other"}}]
+        proposal = assistant.handle("New patient Maria, Collins cottage", "m", False, "MindChart")
+        self.assertEqual(proposal["fields"]["cottage"], "collins")
         self.assertNotIn("program", proposal["fields"])  # a Crisis / stabilization detail, not for residential treatment
         # Shown as first and last name and a placement, the way the form asks for them
         self.assertEqual((proposal["fields"]["first_name"], proposal["fields"]["last_name"]), ("Maria", "Test (fictional)"))
         self.assertEqual((proposal["fields"]["record_type"], proposal["fields"]["placement"]), ("Patient", "Residential treatment"))
         done = assistant.confirm({**proposal, "fields": {k: v for k, v in proposal["fields"].items() if k != "name"}})  # as the form sends it
-        self.assertEqual(self.vault.get_record("patients", done["id"])["custom"]["cottage"], "Cottage 4")
+        self.assertEqual(self.vault.get_record("patients", done["id"])["custom"]["cottage"], "Collins")  # the list's spelling
         self.assertIn("Added Maria Test (fictional)", done["text"])
         self.assertIn("name", assistant.SCHEMA["properties"]["patient_fields"]["properties"])  # the model can give the name
 
