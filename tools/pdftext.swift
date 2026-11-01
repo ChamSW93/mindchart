@@ -3,6 +3,7 @@
 // tries sideways and upside-down orientations. Pages the OCR is unsure about are marked "unclear".
 // Everything runs on this computer; nothing is sent anywhere.
 // Usage: pdftext <file.pdf | image file>
+//        pdftext --combine <out.pdf> <files...>   joins photos and PDFs, in order, into one PDF
 import AppKit
 import Foundation
 import ImageIO
@@ -51,7 +52,39 @@ func isUnclear(_ reading: Reading) -> Bool {
     !reading.text.isEmpty && (reading.confidence < 0.75 || reading.doubtful >= 0.25 || reading.text.count < 40)
 }
 
-let path = CommandLine.arguments.count == 2 ? CommandLine.arguments[1] : ""
+// A picture upright (from the orientation the camera recorded) and no bigger than it needs to be to read, which keeps
+// photos from a phone (12 megapixels or more) from using a lot of memory.
+func upright(_ source: CGImageSource, _ index: Int, longestSide: Int) -> CGImage? {
+    let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+                                    kCGImageSourceThumbnailMaxPixelSize: longestSide]
+    return CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary)
+}
+
+let arguments = CommandLine.arguments
+if arguments.count >= 4 && arguments[1] == "--combine" {
+    let combined = PDFDocument()
+    for file in arguments.dropFirst(3) {
+        let input = URL(fileURLWithPath: file)
+        if input.pathExtension.lowercased() == "pdf", let document = PDFDocument(url: input) {
+            for index in 0..<document.pageCount {
+                if let page = document.page(at: index) { combined.insert(page, at: combined.pageCount) }
+            }
+        } else if let source = CGImageSourceCreateWithURL(input as CFURL, nil) {
+            for index in 0..<CGImageSourceGetCount(source) {
+                guard let image = upright(source, index, longestSide: 2400) else { continue }
+                let picture = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                if let page = PDFPage(image: picture) { combined.insert(page, at: combined.pageCount) }
+            }
+        }
+    }
+    guard combined.pageCount > 0, combined.write(to: URL(fileURLWithPath: arguments[2])) else {
+        FileHandle.standardError.write("Could not combine the files\n".data(using: .utf8)!)
+        exit(1)
+    }
+    exit(0)
+}
+
+let path = arguments.count == 2 ? arguments[1] : ""
 let url = URL(fileURLWithPath: path)
 
 if url.pathExtension.lowercased() == "pdf" {
@@ -87,12 +120,13 @@ if url.pathExtension.lowercased() == "pdf" {
         exit(1)
     }
     for index in 0..<CGImageSourceGetCount(source) {
-        guard let image = CGImageSourceCreateImageAtIndex(source, index, nil) else { continue }
-        // Photos from a phone record which way up they were taken; start from that.
+        guard let image = upright(source, index, longestSide: 3000) else { continue }
+        // Photos from a phone record which way up they were taken, so they're read that way only. Other pictures (a
+        // scan saved sideways, say) are also tried turned, which takes four times the work.
         let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
-        let stored = (properties?[kCGImagePropertyOrientation] as? UInt32).flatMap(CGImagePropertyOrientation.init) ?? .up
-        var reading = recognize(image, stored)
-        if reading.text.count < 80 || reading.confidence < 0.6 {
+        let recordsOrientation = properties?[kCGImagePropertyOrientation] != nil
+        var reading = recognize(image, .up)
+        if !recordsOrientation && (reading.text.count < 80 || reading.confidence < 0.6) {
             let turned = ocr(image)
             if turned.score > reading.score * 1.3 { reading = turned }
         }

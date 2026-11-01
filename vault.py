@@ -97,7 +97,9 @@ _last_activity = time.time()
 _lock = threading.Lock()
 
 SECTIONS = ["identifying", "referral", "hpi", "past_psych", "medications", "risk", "trauma", "substance",
-            "medical", "developmental", "educational", "testing", "family", "social", "legal", "strengths"]
+            "medical", "developmental", "educational", "testing", "family", "social", "legal", "strengths",
+            # What the clinician found at the evaluation being written (only from their evaluation notes)
+            "presentation", "mse", "risk_assessment", "impression", "diagnoses", "recommendations"]
 DOCUMENT_TYPES = list(fieldtypes.DEFAULT_RECORD_TYPES["documents"])
 DOCUMENT_TYPES_BEFORE_V3 = ["Psychiatric Evaluation", "Psychological Evaluation", "Progress or Clinical Note",
                   "Individualized Education Program (IEP)", "Court Order", "Discharge Summary", "Clinician Note", "Other"]
@@ -316,7 +318,8 @@ CREATE VIEW facts_view AS
            d.document_type, d.document_date, f.section, f.fact, f.date, f.quote, f.page, f.verified, f.edited
     FROM facts f JOIN documents d ON d.id = f.document_id JOIN patients p ON p.id = d.patient_id;
 CREATE VIEW drafts_view AS
-    SELECT r.uid AS id, p.uid AS patient_id, p.name AS patient, r.created, r.updated, r.model
+    SELECT r.uid AS id, p.uid AS patient_id, p.name AS patient, COALESCE(json_extract(r.result, '$.kind'), 'history') AS kind,
+           r.created, r.updated, r.model
     FROM drafts r JOIN patients p ON p.id = r.patient_id;
 CREATE VIEW medications_view AS
     SELECT m.uid AS id, p.uid AS patient_id, p.name AS patient, m.name, m.dose, m.frequency, m.target, m.status,
@@ -1338,16 +1341,17 @@ def add_document(patient_uid, name, original, pages):
     return uid
 
 
-def add_note(patient_uid, text, date="", author="", title=""):
-    """A note typed or dictated into MindChart. It's a document like any other, so its facts feed future drafts."""
+def add_note(patient_uid, text, date="", author="", title="", document_type="Clinician Note"):
+    """A note typed or dictated into MindChart. It's a document like any other, so its facts feed future drafts.
+    document_type "Evaluation notes" makes it the clinician's notes for an evaluation being written."""
     if not text.strip():
         raise ValueError("The note is empty")
     date = fieldtypes.normalize_date(date) or datetime.date.today().strftime("%m/%d/%Y")
     with connect() as db:
         patient_id = internal_id(db, "patients", patient_uid)
         _, uid = insert(db, "documents", {
-            "patient_id": patient_id, "name": title.strip() or f"Note {date}", "kind": "Note",
-            "document_type": "Clinician Note", "document_date": date, "author": author.strip(), "added": now(),
+            "patient_id": patient_id, "name": title.strip() or f"{'Evaluation notes' if document_type == fieldtypes.EVALUATION_NOTES else 'Note'} {date}",
+            "kind": "Note", "document_type": document_type, "document_date": date, "author": author.strip(), "added": now(),
             "pages": json.dumps([{"page": None, "text": text.strip(), "scanned": False}])})
     log("added note", patient_id, uid)
     return uid
@@ -1403,6 +1407,29 @@ def next_upload_to_identify():
 def save_suggestion(uid, suggestion, state="ready"):
     with connect() as db:
         db.execute("UPDATE uploads SET suggestion = ?, state = ? WHERE uid = ?", (json.dumps(suggestion), state, uid))
+
+
+def combine_pages(uploads):
+    """The pages of several uploads, in order, numbered as one document's."""
+    pages = []
+    for upload in uploads:
+        pages += [{**p, "page": len(pages) + n} for n, p in enumerate(upload["pages"], 1)]
+    return pages
+
+
+def combine_uploads(uids, name, original, pages, patient_uid, suggestion):
+    """Uploads that are pages of one document (photos of handwritten notes, say) replaced by one upload of them all,
+    which is identified again as a whole. original: the files joined into one PDF. Returns the new upload's ID."""
+    if len(uids) < 2:
+        raise ValueError("Choose at least two files to combine")
+    uid = add_upload(name, original, pages, patient_uid, suggestion)
+    with connect() as db:
+        names = [r[0] for r in db.execute(f"SELECT name FROM uploads WHERE uid IN ({','.join('?' * len(uids))})", uids)]
+        db.executemany("DELETE FROM uploads WHERE uid = ?", [(old,) for old in uids])
+    log("combined uploads into one document", None, f"{uid}: {', '.join(names)}")
+    with connect() as db:
+        db.execute("VACUUM")  # so the separate files don't linger in free space
+    return uid
 
 
 def discard_upload(uid):
@@ -1612,6 +1639,24 @@ def medication_facts(patient_uid):
             """SELECT f.fact, f.date, f.quote, d.name AS document, d.document_type, d.document_date FROM facts f
                JOIN documents d ON d.id = f.document_id JOIN patients p ON p.id = d.patient_id
                WHERE p.uid = ? AND f.section = 'medications' AND f.verified = 1 ORDER BY d.id, f.id""", (patient_uid,))]
+
+
+def evaluation_header(patient_uid):
+    """Who was evaluated, when and by whom, for the top of an evaluation: from the patient's record, not from the AI."""
+    with connect() as db:
+        p = db.execute("SELECT * FROM people_view WHERE id = ?", (patient_uid,)).fetchone()
+        guardians = [r[0] for r in db.execute("SELECT guardian FROM guardianships_view WHERE patient_id = ? ORDER BY guardian", (patient_uid,))]
+    if not p:
+        raise ValueError(f"No patient with ID {patient_uid}")
+    custom, today, born = json.loads(p["details"] or "{}"), datetime.date.today(), fieldtypes.parse_date(p["dob"])
+    age = today.year - born.year - ((today.month, today.day) < (born.month, born.day)) if born else None
+    rows = [("Patient", p["name"]),
+            ("Date of birth", f"{p['dob']}{f' ({age} years old on the date of evaluation)' if age is not None else ''}" if p["dob"] else ""),
+            ("Gender", p["gender"] or ""),
+            ("Placement", ", ".join(x for x in (p["placement"], f"{custom['cottage']} cottage" if custom.get("cottage") else "") if x)),
+            ("Legal guardians" if len(guardians) > 1 else "Legal guardian", ", ".join(guardians) or p["guardian"] or ""),
+            ("Date of evaluation", today.strftime("%m/%d/%Y")), ("Evaluator", get_setting("user_name") or "")]
+    return [(label, value) for label, value in rows if value]
 
 
 def documents_for_history(patient_uid, doc_uids, reread):

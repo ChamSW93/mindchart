@@ -557,3 +557,11 @@ details.past summary { cursor: pointer; margin-bottom: 8px; }
 .obj-incidents { background: var(--warn-soft); color: var(--warn); }
 .field .person-chip { white-space: nowrap; width: auto; }
 .field .person-chip input[type=checkbox] { width: 15px; height: 15px; flex: none; margin: 0; }
+
+/* The psychiatric evaluation */
+.ai-warning { background: var(--warn-soft); color: var(--text); border-left: 4px solid var(--warn); border-radius: 12px;
+  padding: 12px 16px; margin: 0 0 14px; font-size: 14px; line-height: 1.55; }
+.ai-warning b { color: var(--warn); }
+.evaluation-card { border-left: 5px solid var(--accent); }
+.combine-bar { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.combine-pick { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }

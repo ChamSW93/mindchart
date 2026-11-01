@@ -79,13 +79,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDe
         DispatchQueue.main.async { self.web.loadHTMLString(loadingPage(message, error: error), baseURL: nil) }
     }
 
-    func run(_ program: String, _ arguments: [String], in folder: URL? = nil) {
+    func run(_ program: String, _ arguments: [String], in folder: URL? = nil, output: FileHandle? = nil) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: program)
         process.arguments = arguments
         process.currentDirectoryURL = folder
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
+        process.standardOutput = output ?? FileHandle.nullDevice
+        process.standardError = output ?? FileHandle.nullDevice
         try? process.run()
         process.waitUntilExit()
     }
@@ -96,16 +96,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDe
             return show("MindChart's files weren't found in \(home.path). Please reinstall MindChart.", error: true)
         }
         run("/usr/bin/open", ["-g", "-a", "Ollama"])  // Ollama runs the AI model; start it quietly if needed
-        show("Checking for updates…")
-        run(python, ["updater.py"], in: home)
-
-        show("Starting…")
-        port = pickPort()
+        // The updater's messages go in the log too, so a problem with updating can be found
         let logs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/MindChart")
         try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         let outputFile = logs.appendingPathComponent("app-output.log")
         FileManager.default.createFile(atPath: outputFile.path, contents: nil)
         let output = try? FileHandle(forWritingTo: outputFile)
+        show("Checking for updates…")
+        run(python, ["updater.py"], in: home, output: output)
+
+        show("Starting…")
+        port = pickPort()
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)

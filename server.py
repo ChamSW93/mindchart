@@ -25,6 +25,7 @@ import urllib.request
 from pathlib import Path
 
 import assistant
+import fields as fieldtypes
 import documents
 import history
 import intake
@@ -86,7 +87,7 @@ def download_recommended_model():
 def filevault_on():
     """Whether the Mac's own disk encryption is on. HIPAA expects devices holding patient data to be encrypted."""
     return "FileVault is On" in subprocess.run(["fdesetup", "status"], capture_output=True, text=True).stdout
-UPDATE = {"current": updater.current_version(), "available": False}
+UPDATE = {"current": updater.current_version(), "available": False, "last_check": updater.last_check()}
 
 
 def check_for_updates_forever():
@@ -344,6 +345,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if is_("GET", "uploads"):
             return {"uploads": [intake.refresh(u) for u in vault.list_uploads()], "pull_preferences": vault.pull_preferences(),
                     "patients": vault.patients_for_matching()}
+        if is_("POST", "uploads", "combine"):  # separate files that are pages of one document, in this order
+            uids = [str(u) for u in data.get("ids") or []]
+            files = [vault.get_upload(uid) for uid in uids]  # (each must still be waiting)
+            name = f"{Path(files[0]['name']).stem} + {len(files) - 1} more.pdf" if files else ""
+            pages, target = vault.combine_pages(files), next((f["patient_uid"] for f in files if f["patient_uid"]), None)
+            suggestion, _ = intake.suggest(name, pages, target)
+            original = documents.combine([(f["name"], f["original"]) for f in files])
+            return {"id": vault.combine_uploads(uids, name, original, pages, target, suggestion)}
         if is_("POST", "uploads", "*", "confirm"):
             document_id, patient_id = vault.confirm_upload(args[0], data)
             return {"document_id": document_id, "patient_id": patient_id}
@@ -383,6 +392,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if is_("POST", "cottage-analyses", "*", "feedback"):
             vault.save_analysis_feedback(int(args[0]), data.get("rating"), data.get("comment", ""))
             return {}
+        if is_("POST", "update", "check"):  # from Settings: look for a newer version now
+            UPDATE.update(updater.status())
+            return UPDATE
+        if is_("POST", "update", "install"):  # from Settings: install it now; it takes over when MindChart reopens
+            if (updater.HERE / ".git").exists():
+                raise ValueError("This is the development copy of MindChart, which isn't updated from releases")
+            latest = updater.latest_release()
+            if not latest:
+                raise ValueError(f"Couldn't reach GitHub: {updater.last_error}")
+            if updater.as_tuple(latest["version"]) <= updater.as_tuple(UPDATE["current"]):
+                raise ValueError("MindChart is already up to date")
+            before = UPDATE["current"]
+            try:
+                updater.install(latest)
+            except Exception as error:
+                updater.record(f"The update to {latest['version']} didn't install ({error})")
+                raise ValueError(f"The update didn't install: {error}")
+            updater.record(f"Updated from {before} to {latest['version']} (from Settings)")
+            UPDATE.update(installed=latest["version"], available=False, last_check=updater.last_check())
+            return UPDATE
         if is_("GET", "medication-names"):  # offered when adding a medication
             return {"medications": vault.medication_names()}
         if is_("GET", "zip"):  # ZIP codes and towns, worked out on this Mac
@@ -395,7 +424,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             vault.save_draft_edits(args[0], data["result"])
             return {}
         if is_("POST", "export"):
-            docx = history.build_docx(data["sections"], data["documents"])
+            docx = history.build_docx(data["sections"], data["documents"], data.get("kind") or "history", data.get("header"))
             if data.get("draft_id"):  # leaving the encrypted store is recorded, since the file isn't encrypted
                 vault.log("exported a draft to Word", vault.internal_patient("drafts", data["draft_id"]), data["draft_id"])
             self.send_body(200, docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
@@ -405,33 +434,42 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return assistant.handle(data["message"], model, thinking, APP_NAME)
         if is_("POST", "assistant", "confirm"):
             return assistant.confirm(data["proposal"])
-        if is_("POST", "extract"):  # a chat attachment, as one block of text
-            return {"name": query.get("name", "file"), "text": documents.extract_text(query.get("name", "file"), body)}
+        if is_("POST", "extract"):  # a chat attachment, as one block of text, noting pages the OCR couldn't read well
+            pages = documents.read_pages(query.get("name", "file"), body)
+            return {"name": query.get("name", "file"), "text": documents.pages_text(pages),
+                    "unclear": [p["page"] for p in pages if p.get("unclear")]}
         if is_("POST", "chat"):
             return self.chat(data)
         raise KeyError("Unknown request")
 
     def build_history(self, patient_uid, data):
-        """Draft a history from a patient's documents, saving what's read and the draft itself."""
+        """Draft a psychiatric evaluation (or the history alone) from a patient's documents, saving what's read and the
+        draft. Evaluation notes typed into the form are saved first, as a document of their own."""
         model, thinking = model_choice(data)
-        docs = vault.documents_for_history(patient_uid, data.get("doc_ids") or [], data.get("reread"))
+        evaluation = data.get("kind", "evaluation") == "evaluation"
+        doc_ids = list(data.get("doc_ids") or [])
+        if evaluation and str(data.get("notes") or "").strip():
+            doc_ids.append(vault.add_note(patient_uid, data["notes"], title=f"Evaluation notes {time.strftime('%m/%d/%Y')}",
+                                          document_type=fieldtypes.EVALUATION_NOTES))
+        docs = vault.documents_for_history(patient_uid, doc_ids, data.get("reread"))
         if not docs:
-            raise ValueError("Choose at least one document")
-        vault.log("built a history", vault.internal("patients", patient_uid), model)
+            raise ValueError("Choose at least one source")
+        header = vault.evaluation_header(patient_uid) if evaluation else None
+        vault.log("wrote an evaluation" if evaluation else "built a history", vault.internal("patients", patient_uid), model)
         self.start_stream()
         try:
             if worker.STATUS["current"]:
                 self.stream_line({"progress": "Waiting for background reading to finish its current step", "step": 0, "total": 1})
             with worker.paused():
-                self.stream_history(patient_uid, docs, model, thinking, data.get("reread"))
+                self.stream_history(patient_uid, docs, model, thinking, data.get("reread"), evaluation, header)
         except Exception as error:
             self.stream_line({"error": str(error)})
 
-    def stream_history(self, patient_uid, docs, model, thinking, reread):
+    def stream_history(self, patient_uid, docs, model, thinking, reread, evaluation=False, header=None):
         if not reread:  # documents read in the background while this waited are picked up, not read twice
             read_now = {d["uid"]: d for d in vault.documents_for_history(patient_uid, [d["uid"] for d in docs], False)}
             docs = [read_now[d["uid"]] if "facts" in read_now.get(d["uid"], {}) and "facts" not in d else d for d in docs]
-        for update in history.build(docs, model, thinking, vault.document_field_definitions(), intake.document_types()):
+        for update in history.build(docs, model, thinking, vault.document_field_definitions(), intake.document_types(), evaluation, header):
             vault.touch()  # a long build counts as activity, so MindChart stays unlocked
             if "document_read" in update:
                 read = update["document_read"]

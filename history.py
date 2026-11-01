@@ -63,9 +63,33 @@ SECTIONS = [
     ("strengths", "Strengths and Interests",
      "strengths, interests, hobbies, positive relationships, protective factors"),
 ]
-SECTION_TITLES = {key: title for key, title, _ in SECTIONS}
+# What the clinician found at the evaluation being written. Only their own evaluation notes can supply these: a past
+# evaluation's diagnoses are history (past_psych), not today's findings.
+EVALUATION_SECTIONS = [
+    ("presentation", "Interview and Current Presentation",
+     "what the youth, guardian, staff and others reported at THIS evaluation, and what the clinician observed"),
+    ("mse", "Mental Status Examination",
+     "appearance, behavior, speech, mood and affect, thought process and content, perception, cognition, insight and "
+     "judgment, as the clinician recorded them at this evaluation"),
+    ("risk_assessment", "Risk Assessment", "the clinician's assessment of current risk (suicide, self-harm, violence, running away)"),
+    ("impression", "Clinical Formulation and Impression", "the clinician's summary, formulation and impressions"),
+    ("diagnoses", "Diagnoses", "diagnoses the clinician gives at this evaluation, exactly as written"),
+    ("recommendations", "Recommendations and Plan",
+     "the clinician's recommendations and plan: medications, therapy, level of care, school, safety, follow-up"),
+]
+SECTION_TITLES = {key: title for key, title, _ in SECTIONS + EVALUATION_SECTIONS}
+# A full evaluation: the clinician's findings around the history, in the usual order
+# (Today's interview, "presentation", is written into the History of Present Illness, which leads with it.)
+# Identifying information comes from the patient's record (build's "header"), not from the AI.
+EVALUATION_ORDER = ["referral", "hpi", "past_psych", "medications", "risk", "trauma", "substance",
+                    "medical", "developmental", "educational", "testing", "family", "social", "legal", "strengths", "mse",
+                    "risk_assessment", "impression", "diagnoses", "recommendations"]
+EVALUATION_KEYS = {key for key, _, _ in EVALUATION_SECTIONS}
+HALLUCINATION_WARNING = ("Drafted by the AI on this Mac. AI can leave things out and can state things the records don't say "
+                         "(\"hallucinate\"). Check every sentence against the source it cites before using any of it. "
+                         "Diagnoses and recommendations come only from the clinician's own notes.")
 
-EXTRACT_PROMPT = """You help a psychiatric nurse practitioner gather the history for a child and adolescent psychiatric evaluation. You will be given an excerpt from one source record.
+EXTRACT_RULES = """You help a psychiatric nurse practitioner gather the history for a child and adolescent psychiatric evaluation. You will be given an excerpt from one source record.
 
 List every clinically relevant fact in the excerpt. Rules:
 - Only facts the text states. Never guess, infer, interpret or add diagnoses.
@@ -75,30 +99,45 @@ List every clinically relevant fact in the excerpt. Rules:
 - "quote": copy 5 to 30 consecutive words EXACTLY as they appear in the excerpt that support the fact. Do not paraphrase the quote.
 - "section": the best category below.
 - Skip letterheads, signatures, page numbers, form instructions and legal boilerplate.
+"""
+EVALUATION_NOTES_RULE = """
+This excerpt is the clinician's OWN notes from the evaluation being written now. What they found, observed, assessed,
+diagnosed and planned at this evaluation goes in presentation, mse, risk_assessment, impression, diagnoses and
+recommendations (keep diagnoses exactly as written). Earlier history the notes mention goes in the history categories.
+"""
 
-Categories:
-""" + "\n".join(f"- {key}: {description}" for key, _, description in SECTIONS)
 
-EXTRACT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "facts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "section": {"type": "string", "enum": [key for key, _, _ in SECTIONS]},
-                    # Length limits stop the model getting stuck repeating itself inside a field.
-                    "fact": {"type": "string", "maxLength": 400},
-                    "date": {"type": "string", "maxLength": 40},
-                    "quote": {"type": "string", "maxLength": 300},
+def extract_prompt(evaluation_notes=False):
+    sections = SECTIONS + (EVALUATION_SECTIONS if evaluation_notes else [])
+    return (EXTRACT_RULES + (EVALUATION_NOTES_RULE if evaluation_notes else "") + "\nCategories:\n"
+            + "\n".join(f"- {key}: {description}" for key, _, description in sections))
+
+
+def extract_schema(evaluation_notes=False):
+    sections = SECTIONS + (EVALUATION_SECTIONS if evaluation_notes else [])
+    return {
+        "type": "object",
+        "properties": {
+            "facts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "section": {"type": "string", "enum": [key for key, _, _ in sections]},
+                        # Length limits stop the model getting stuck repeating itself inside a field.
+                        "fact": {"type": "string", "maxLength": 400},
+                        "date": {"type": "string", "maxLength": 40},
+                        "quote": {"type": "string", "maxLength": 300},
+                    },
+                    "required": ["section", "fact", "date", "quote"],
                 },
-                "required": ["section", "fact", "date", "quote"],
-            },
-        }
-    },
-    "required": ["facts"],
-}
+            }
+        },
+        "required": ["facts"],
+    }
+
+
+EXTRACT_PROMPT, EXTRACT_SCHEMA = extract_prompt(), extract_schema()
 
 IDENTIFY_PROMPT = """Identify this clinical record from its file name and opening text.
 - document_type: the closest type:
@@ -135,7 +174,7 @@ def identify(model, thinking, name, text, types, examples=()):
 
 DEFAULT_TYPES = {t: d for t, d in fieldtypes.TYPE_DESCRIPTIONS.items() if t != "Clinician Note"}
 
-WRITE_PROMPT = """You help a psychiatric nurse practitioner draft the history for a child and adolescent psychiatric evaluation.
+WRITE_PROMPT = """You help a psychiatric nurse practitioner draft a child and adolescent psychiatric evaluation.
 
 Write the "{title}" section using ONLY the numbered facts provided, as a list of sentences. Rules:
 - For each sentence, list the numbers of the facts it relies on in "facts". Every sentence needs at least one.
@@ -515,10 +554,14 @@ def extract_facts(model, thinking, doc, chunk):
     text (fewer than one fact per ~400 characters), ask once more for everything it missed.
     """
     excerpt = f"Source: {doc['document_type']}, dated {doc['document_date'] or 'unknown'}\n\nExcerpt:\n{chunk}"
+    notes = doc.get("document_type") == fieldtypes.EVALUATION_NOTES  # the clinician's own notes may fill the evaluation sections
+    prompt, schema = (extract_prompt(True), extract_schema(True)) if notes else (EXTRACT_PROMPT, EXTRACT_SCHEMA)
     try:
-        facts = ask(model, thinking, EXTRACT_PROMPT, excerpt, EXTRACT_SCHEMA, max_tokens=6000)["facts"]
+        facts = ask(model, thinking, prompt, excerpt, schema, max_tokens=6000)["facts"]
+        if not notes:  # only they can: a past evaluation's diagnosis is history, not today's finding
+            facts = [f for f in facts if f.get("section") not in EVALUATION_KEYS]
         if len(chunk) > 800 and len(facts) < len(chunk) / 400:
-            more = ask(model, thinking, EXTRACT_PROMPT, excerpt, EXTRACT_SCHEMA, max_tokens=6000, history=[(
+            more = ask(model, thinking, prompt, excerpt, schema, max_tokens=6000, history=[(
                 json.dumps({"facts": facts}),
                 "That list is incomplete. Go through the excerpt again from the start and list every clinically "
                 "relevant fact: symptoms, diagnoses, dates, medications, test scores, placements, services, events "
@@ -657,7 +700,38 @@ def read_document(doc, label, model, thinking, document_fields=None, pull=None, 
     yield {"document_read": {"info": info, "facts": facts, "filled": filled}}
 
 
-def build(documents, model, thinking, document_fields=None, types=None):
+# An evaluation is written the way a clinician writes one, concise and synthesized, not as a summary of every record
+# (a tester's words for that: "a dossier on the kid instead of forming an evaluation").
+EVALUATION_PROMPT = """You help a child and adolescent psychiatric nurse practitioner write the "{title}" section of a psychiatric
+evaluation, from numbered facts drawn from the youth's records and the clinician's notes.
+
+Write it the way a clinician writes an evaluation, not a summary of the file:
+- Concise: {length}. Lead with what matters most for understanding the youth now.
+- Synthesize: group repeated events into one statement (for example "four physical altercations with peers since
+  admission in April 2024") instead of listing each one. Keep single events that matter clinically, with their dates:
+  suicide attempts, hospitalizations, abuse, court orders, medication trials and why they stopped.
+- Keep the key specifics: diagnoses, medications with doses, test scores, placements, legal status.
+- When you combine facts, keep each date and number with its own event.
+- Call something current only if it's the most recent information by source date; earlier sources describe the past.
+- For each sentence, list the numbers of the facts it relies on in "facts". Every sentence needs at least one.
+- Never add information that is not in the facts. Do not diagnose or interpret.
+- Never calculate ages, durations or dates; say which source date a "current" detail is as of.
+- Only include facts that belong in this section.
+- If facts disagree, say so briefly in a sentence citing both, and list it in "conflicts"."""
+SECTION_LENGTH = {"identifying": "one or two sentences on details such as school and grade (name, birth date and placement are given separately)",
+                  "referral": "two or three sentences",
+                  "hpi": "one or two short paragraphs, up to eight sentences, starting with how the youth is doing now according to the "
+                         "clinician's notes from this evaluation, then how things developed",
+                  "mse": "one compact paragraph covering each domain recorded", "diagnoses": "one diagnosis per sentence, as written",
+                  "recommendations": "one recommendation per sentence"}
+CORE_EVALUATION_SECTIONS = ("mse", "impression", "diagnoses", "recommendations")  # shown even when empty, to be filled in
+
+EVALUATION_WRITE_NOTE = """
+These facts come from the clinician's own notes from this evaluation. Keep their clinical judgments exactly as they
+wrote them: list diagnoses word for word, and never add a diagnosis, risk level or recommendation they didn't write."""
+
+
+def build(documents, model, thinking, document_fields=None, types=None, evaluation=False, header=None):
     """Run the whole process, yielding progress updates and finally the result.
 
     documents: [{"name": "file.pdf", "pages": [{"page", "text", "scanned"}, ...]}, ...]
@@ -666,10 +740,15 @@ def build(documents, model, thinking, document_fields=None, types=None):
     can be saved for next time.
     document_fields: {record type: [field definitions the AI fills in]}; filled values come back in "document_read".
     types: {document type: what it is}, for identifying documents whose type isn't known.
+    evaluation: write a full psychiatric evaluation (the history plus the clinician's findings from their evaluation notes)
+    rather than the history alone.
+    header: [(label, value)] about the evaluation itself (patient, birth date, evaluator...), taken from the patient's record
+    rather than written by the AI, shown at the top.
     """
+    order = EVALUATION_ORDER if evaluation else [key for key, _, _ in SECTIONS]
     for doc in documents:
         prepare(doc)
-    total = sum(len(d["chunks"]) + 1 for d in documents if "facts" not in d) + len(SECTIONS)
+    total = sum(len(d["chunks"]) + 1 for d in documents if "facts" not in d) + len(order)
     step = 0
     facts = []
 
@@ -691,11 +770,17 @@ def build(documents, model, thinking, document_fields=None, types=None):
         step += len(doc["chunks"]) + 1
 
     sections = []
-    for key, title, _ in SECTIONS:
+    for key in order:
+        title = SECTION_TITLES[key]
         yield {"progress": f"Writing {title}", "step": step, "total": total}
-        section_facts = [f for f in facts if f["section"] == key]
+        wanted = ("presentation", "hpi") if evaluation and key == "hpi" else (key,)  # today's interview first, then the history
+        section_facts = sorted((f for f in facts if f["section"] in wanted), key=lambda f: wanted.index(f["section"]))
         usable = [f for f in section_facts if f["verified"]]
-        narrative, conflicts = "No information found in the provided records.", []
+        if evaluation and not usable and key not in CORE_EVALUATION_SECTIONS:
+            step += 1
+            continue  # an evaluation leaves out what the sources don't cover, rather than listing empty headings
+        narrative, conflicts = ("Not in your evaluation notes yet: add it here, or to your notes before writing again."
+                                if key in EVALUATION_KEYS else "No information found in the provided records."), []
         if usable:
             numbered = "\n".join(
                 # The event's date goes inside the source note, so it isn't copied into the text as "Date: ...".
@@ -704,10 +789,12 @@ def build(documents, model, thinking, document_fields=None, types=None):
                 for n, f in enumerate(usable, 1)
             )
             try:
-                written = ask(model, thinking, WRITE_PROMPT.format(title=title), f"Facts:\n{numbered}", WRITE_SCHEMA, max_tokens=8000)
+                prompt = (EVALUATION_PROMPT.format(title=title, length=SECTION_LENGTH.get(key, "two to five sentences")) if evaluation
+                          else WRITE_PROMPT.format(title=title)) + (EVALUATION_WRITE_NOTE if key in EVALUATION_KEYS else "")
+                written = ask(model, thinking, prompt, f"Facts:\n{numbered}", WRITE_SCHEMA, max_tokens=8000)
                 narrative = join_sentences(written["sentences"], usable, documents)
-                conflicts = [
-                    {"description": c["description"],
+                conflicts = unsupported_details(written["sentences"], usable, documents) + [
+                    {"description": unnumbered(c["description"]),
                      "sources": "; ".join(dict.fromkeys(cite(usable[n - 1], documents) for n in c["facts"] if 0 < n <= len(usable)))}
                     for c in written.get("conflicts", []) if c.get("description")
                 ]
@@ -722,6 +809,9 @@ def build(documents, model, thinking, document_fields=None, types=None):
         step += 1
 
     yield {"result": {
+        "kind": "evaluation" if evaluation else "history",
+        "warning": HALLUCINATION_WARNING,
+        "header": [list(item) for item in header or []],
         "sections": sections,
         "documents": [
             {"label": f"D{i + 1}", "name": d["name"], "type": d["document_type"], "date": d["document_date"],
@@ -741,7 +831,7 @@ def join_sentences(sentences, usable, documents):
     parts = []
     for sentence in sentences:
         # Drop fact numbers the model wrote itself, like "[3]" or "(fact 2)" or "(facts 1 and 4)"; MindChart adds sources.
-        text = re.sub(r"\s*(\[[\d,\s]+\]|\((?:facts?|fact\s*#)\s*[\d,\s]+(?:and\s*\d+)?\))", "", sentence.get("text", "")).strip()
+        text = unnumbered(re.sub(r"\s*\(fact\s*#\s*\d+\)", "", sentence.get("text", ""), flags=re.I))
         if not text:
             continue
         labels = list(dict.fromkeys(cite(usable[n - 1], documents) for n in sentence.get("facts", []) if 0 < n <= len(usable)))
@@ -749,10 +839,30 @@ def join_sentences(sentences, usable, documents):
     return " ".join(parts) or "No information found in the provided records."
 
 
+DETAILS = re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b|\b(?:19|20)\d\d\b|\b\d+(?:\.\d+)?\s?(?:mg|mcg|ml|units?)\b", re.I)
+
+
+def unsupported_details(sentences, usable, documents):
+    """Dates, years and doses in the written sentences that aren't in the facts each one cites: the commonest way a
+    model makes something up. Returned as "Check" notes, shown like disagreements between sources."""
+    flagged = []
+    for sentence in sentences:
+        cited = [usable[n - 1] for n in sentence.get("facts", []) if 0 < n <= len(usable)]
+        known = normalize(" ".join(f"{f['fact']} {f.get('date', '')} {f.get('quote', '')} {documents[f['doc']].get('document_date') or ''}"
+                                   for f in cited))
+        for detail in dict.fromkeys(DETAILS.findall(sentence.get("text", ""))):
+            variants = {normalize(detail), normalize(re.sub(r"\b0(\d)", r"\1", detail)), normalize(detail.replace(" ", ""))}
+            if not any(v and v in known for v in variants) and not any(v in known.replace(" ", "") for v in variants):
+                flagged.append({"description": f"Check \u201c{detail}\u201d: it isn't in the records this sentence cites "
+                                               f"(\u201c{unnumbered(sentence.get('text', ''))[:140]}\u201d)",
+                                "sources": "; ".join(dict.fromkeys(cite(f, documents) for f in cited))})
+    return flagged
+
+
 # --- Word export ---------------------------------------------------------------
 
-def build_docx(sections, documents):
-    """A simple .docx (Word) file of the draft history, made without extra software."""
+def build_docx(sections, documents, kind="history", header=None):
+    """A simple .docx (Word) file of the draft, made without extra software."""
     def paragraph(text, bold=False, italic=False, size=None, color=None, space_after=120):
         props = ("<w:b/>" if bold else "") + ("<w:i/>" if italic else "") + \
                 (f'<w:sz w:val="{size}"/>' if size else "") + (f'<w:color w:val="{color}"/>' if color else "")
@@ -760,11 +870,12 @@ def build_docx(sections, documents):
                 f'<w:r><w:rPr>{props}</w:rPr><w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>')
 
     body = [
-        paragraph("Psychiatric Evaluation: History (DRAFT)", bold=True, size=32),
-        paragraph("Drafted by a local AI model from the source documents listed at the end. "
-                  "It must be reviewed and verified against the source records by the clinician before use. "
-                  "Citations like [D2 p.4] refer to document 2, page 4.", italic=True, size=18, color="666666", space_after=240),
-    ]
+        paragraph("Psychiatric Evaluation (DRAFT)" if kind == "evaluation" else "Psychiatric Evaluation: History (DRAFT)", bold=True, size=32),
+        paragraph("DRAFT: NOT REVIEWED. " + HALLUCINATION_WARNING, bold=True, size=20, color="B00020", space_after=120),
+        paragraph("Drafted from the source documents listed at the end. Citations like [D2 p.4] refer to document 2, page 4.",
+                  italic=True, size=18, color="666666", space_after=240),
+    ] + ([paragraph("Identifying Information", bold=True, size=26, space_after=80)] if header else []) \
+      + [paragraph(f"{label}: {value}", space_after=40) for label, value in header or []] + ([paragraph("", space_after=120)] if header else [])
     for s in sections:
         body.append(paragraph(s["title"], bold=True, size=26, space_after=80))
         for line in (s.get("narrative") or "").split("\n"):

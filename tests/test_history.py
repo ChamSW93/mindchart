@@ -102,6 +102,39 @@ class Drafting(unittest.TestCase):
         self.assertFalse(any("Reading" in (u.get("progress") or "") for u in updates))
 
 
+    def test_an_evaluation_is_concise_and_findings_come_only_from_the_clinicians_notes(self):
+        record = {"name": "old eval.pdf", "pages": [{"page": 1, "text": "Diagnosis: ADHD. Takes guanfacine 1 mg at bedtime.", "scanned": False}]}
+        notes = {"name": "Evaluation notes 11/01/2026", "pages": [{"page": None, "text": "Calm, cooperative. Dx: PTSD. Plan: start therapy.",
+                                                                   "scanned": False}],
+                 "info": {"document_type": "Evaluation notes", "document_date": "11/01/2026", "author": ""}}
+        prompts = []
+
+        def ask(model, thinking, system, user, schema, max_tokens, history=()):
+            prompts.append(system)
+            if "document_type" in schema["properties"]:
+                return {"document_type": "Psychiatric Evaluation", "document_date": "09/18/2023", "author": "",
+                        "patient_name": "", "date_of_birth": "", "identifiers": []}
+            if "facts" in schema["properties"]:  # reading: the record names a diagnosis too, which must stay history
+                if "Calm, cooperative" in user:
+                    return {"facts": [{"section": "diagnoses", "fact": "Diagnosed with PTSD.", "date": "", "quote": "Calm, cooperative. Dx: PTSD."},
+                                      {"section": "mse", "fact": "Calm and cooperative.", "date": "", "quote": "Calm, cooperative. Dx: PTSD."}] * 3}
+                return {"facts": [{"section": "diagnoses", "fact": "Diagnosed with ADHD.", "date": "", "quote": "Diagnosis: ADHD. Takes guanfacine"},
+                                  {"section": "medications", "fact": "Takes guanfacine 1 mg.", "date": "", "quote": "Takes guanfacine 1 mg at bedtime"}] * 3}
+            return {"sentences": [{"text": "A sentence.", "facts": [1]}], "conflicts": []}
+        history.ask = ask
+        result = list(history.build([record, notes], "m", False, evaluation=True))[-1]["result"]
+        keys = [s["key"] for s in result["sections"]]
+        self.assertEqual(result["kind"], "evaluation")
+        self.assertIn("hallucinate", result["warning"])
+        self.assertEqual(keys, ["medications", "mse", "impression", "diagnoses", "recommendations"])  # no empty history headings
+        diagnoses = next(s for s in result["sections"] if s["key"] == "diagnoses")
+        self.assertEqual([f["fact"] for f in diagnoses["facts"]], ["Diagnosed with PTSD."] * 3)  # the old ADHD diagnosis isn't today's
+        self.assertIn("Not in your evaluation notes", next(s for s in result["sections"] if s["key"] == "impression")["narrative"])
+        self.assertTrue(any("not a summary of the file" in p for p in prompts))  # written as an evaluation, not a dossier
+        history_mode = list(history.build([dict(record)], "m", False))[-1]["result"]
+        self.assertEqual(len(history_mode["sections"]), len(history.SECTIONS))  # the detailed history keeps every section
+
+
 history_module = history
 
 
@@ -213,6 +246,12 @@ class MedicationsAndNotes(unittest.TestCase):
         self.assertEqual(key("Methylphenidate (Ritalin)"), key("methylphenidate"))
         self.assertEqual(key("Sertraline 50 mg tablets"), "sertraline")
         self.assertNotEqual(key("Vitamin D"), key("Vitamin B12"))
+
+    def test_fact_labels_are_taken_out_of_drafts_whatever_their_case(self):
+        documents = [{"name": "a.pdf", "document_type": "Other", "document_date": "", "pages": [{"page": 1}]}]
+        usable = [{"doc": 0, "page": 1, "fact": "x"}]
+        self.assertEqual(history.join_sentences([{"text": "He was hospitalized (Fact 3).", "facts": [1]}], usable, documents),
+                         "He was hospitalized. [D1 p.1]")
 
     def test_fact_numbers_are_taken_out_of_briefings(self):
         self.assertEqual(history.unnumbered("Devon was vaping (Fact 1). Eli felt pressured (Fact 1, Fact 3) [2]."),

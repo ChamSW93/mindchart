@@ -1,6 +1,6 @@
 # MindChart
 
-A private, offline app for keeping child and adolescent psychiatric records and drafting the **history section of a psychiatric evaluation** from source records: past psychiatric and psychological evaluations, clinical notes, IEPs and court orders, as PDFs, Word files, photos or faxes.
+A private, offline app for keeping child and adolescent psychiatric records and drafting a **psychiatric evaluation** from many sources: the clinician's own evaluation notes plus the records, past psychiatric and psychological evaluations, clinical notes, IEPs and court orders, as PDFs, Word files, photos or faxes.
 
 Everything runs on the Mac. The app, its server and the AI model (through [Ollama](https://ollama.com)) never send record contents over the internet.
 
@@ -54,7 +54,13 @@ This puts **MindChart.app** in the Applications folder (and Launchpad), download
 - **Timeline.** A patient's history in date order: dated facts from their documents (verified ones only, including partial dates like "March 2019"), documents, medications started and stopped, scores, follow-ups and admission.
 - **Visit notes.** On a patient's page, Write visit note: the clinician types what happened since the last visit, clicks through a **mental status exam** (with "Mark the usual findings", and choices that rule each other out, such as "denies suicidal ideation" and "suicidal ideation with plan"), and adds an assessment and plan. Current medications and latest scores can be included. The AI writes it up as Subjective, Objective, Assessment and Plan without adding anything (or it can be put together without AI). It can then be edited, **copied** into the agency's records system, or saved to the patient's record, where it feeds future history drafts.
 - **Search inside documents.** The Documents list searches each document's text, not just its name.
-- **Drafting a history.** On a patient's page, click Build history. Documents already read in the background are reused, so usually only the writing is left. Corrections made to facts are used in future drafts. The draft opens for review: every sentence cites its sources (`[D2 p.4]`), red boxes flag where documents disagree, pages that came from OCR are noted, and Export to Word saves a .docx.
+- **Several photos of one document** (pages of handwritten notes, say) can be ticked in Uploads and combined into one document, read as a whole. **Evaluation notes** is its own document type, so a clinician's working notes aren't mistaken for a finished evaluation.
+- **Writing an evaluation.** On a patient's page, click **Write evaluation**: tick the sources, add your evaluation notes (type, paste or dictate them, or upload them, as photos combined into one document if need be), and choose **Psychiatric evaluation** or **Detailed history**.
+  - The evaluation is written the way a clinician writes one: concise, with repeated events synthesized and empty sections left out, in the usual order (identifying information, reason for referral, interview and current presentation, the history sections, mental status, risk assessment, formulation and impression, diagnoses, recommendations).
+  - The history comes from all the sources; the interview, mental status, risk assessment, impression, diagnoses and plan come **only from the clinician's evaluation notes**, never from the AI, and a past evaluation's diagnoses stay history.
+  - Every sentence cites its sources (`[D2 p.4]`), red boxes flag where sources disagree, and facts whose quote isn't found are left out. Documents already read are reused, and corrections to facts are used.
+  - **Strong warnings** that the AI can leave things out or state things the records don't say ("hallucinate") appear before writing, at the top of every draft and in bold red at the top of the Word file. The latest evaluation shows on the patient's page.
+  - **Detailed history** instead lists everything the records say, section by section.
 
 ## How it avoids made-up content
 
@@ -118,7 +124,7 @@ macOS "Reduce motion" turns animations off. Other downloaded models can be picke
 scripts/test.sh
 ```
 
-138 automated tests cover:
+143 automated tests cover:
 - document reading, including OCR of scans, photos, sideways pages and pictures in Word files
 - uploads, patient matching (including the wrong-sibling warning) and learning document types
 - background reading, quote checking and citations, and the drafting flow
@@ -132,7 +138,7 @@ scripts/test.sh
 
 ## Updates
 
-Installed copies check for a newer release each time they start, download it, verify its checksum and replace only the app's files (and the app in Applications). The data store isn't touched. If the recommended AI model changed, MindChart downloads it in the background. To publish a version:
+Installed copies check for a newer release each time they start, download it, verify its checksum and replace only the app's files (and the app in Applications). The data store isn't touched. If the recommended AI model changed, MindChart downloads it in the background. To publish a version: If GitHub's API can't be reached (it limits how often one network address can ask, which a shared office network can use up), the release page's own link is used instead. Each check's result is kept in `~/Library/Logs/MindChart/last-update-check.json` and shown in **Settings → Version and updates**, which can also check and install on demand.
 
 ```
 scripts/release.sh 0.3.1 "What changed"

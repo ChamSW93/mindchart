@@ -38,6 +38,7 @@ PLACEMENTS = list(PLACEMENT_FIELDS)
 COTTAGES = sorted(["Rose", "Collins", "Smith", "Crest", "Fanshaw", "Kendall", "Howard", "Van Horn", "Dwight", "Williams",
                    "Butler", "Minturn", "JRIC", "NEST", "AOBH"], key=str.lower)
 GENDERS = ["Male", "Female", "X"]
+EVALUATION_NOTES = "Evaluation notes"  # the document type for the clinician's own notes from the evaluation being written
 INCIDENT_TYPES = ["Physical aggression", "Verbal aggression or threats", "Injury", "Self-harm", "AWOL / elopement",
                   "Restraint or hold", "Property damage", "Substance use", "Sexual behavior", "Bullying", "Medical", "Other"]
 
@@ -118,6 +119,7 @@ DEFAULT_RECORD_TYPES = {
             ai("note_type", "Note type", "picklist", ["Medication management", "Therapy", "Nursing", "Incident", "Other"]),
         ],
         "Clinician Note": [],
+        "Evaluation notes": [],
         "Other": [],
     },
     # Rating scales and vitals. Only scores are kept (never the questions), so no scale's wording is reproduced.
@@ -169,11 +171,13 @@ TYPE_DESCRIPTIONS = {
     "Court Order": "an order, decision or petition from a court",
     "Individualized Education Program (IEP)": "a school special education plan (classification, services, goals)",
     "Psychological Evaluation": "a psychologist's testing report (IQ, achievement or personality tests)",
-    "Psychiatric Evaluation": "a psychiatrist's or nurse practitioner's diagnostic evaluation (often with history, "
+    "Psychiatric Evaluation": "a finished, typed psychiatric evaluation report by a psychiatrist or nurse practitioner (often with history, "
                               "mental status exam, diagnoses)",
     "Discharge Summary": "a summary written when leaving a hospital or program",
     "Progress or Clinical Note": "a medication management, therapy, nursing or progress note",
     "Clinician Note": "a note written in MindChart itself",
+    "Evaluation notes": "the clinician's own working notes from an evaluation interview (often handwritten, typed or dictated: "
+                        "what the youth and others said, observations, mental status, impressions, plans), not a finished report",
     "Other": "anything that doesn't fit another type",
 }
 

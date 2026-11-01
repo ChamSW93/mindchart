@@ -95,7 +95,10 @@ def text_in_pictures(data):
 
 def extract_text(name, data):
     """A file's text as one string, cut to a size that fits in a chat message."""
-    pages = read_pages(name, data)
+    return pages_text(read_pages(name, data))
+
+
+def pages_text(pages):
     if pages[0]["page"] is None:
         text = pages[0]["text"]
     else:
@@ -103,6 +106,22 @@ def extract_text(name, data):
     if len(text) > MAX_CHAT_FILE_CHARS:
         text = text[:MAX_CHAT_FILE_CHARS] + "\n\n[...file cut off here because it's too long...]"
     return text
+
+
+def combine(files):
+    """Photos, scans and PDFs (as [(file name, bytes)]) joined in order into one PDF, as bytes: the pages of one
+    document that came in as separate files, such as photos of handwritten notes."""
+    if any(Path(name).suffix.lower() not in IMAGE_TYPES | {".pdf"} for name, _ in files):
+        raise ValueError("Only photos, scans and PDFs can be combined into one document")
+    with tempfile.TemporaryDirectory() as folder:
+        paths = []
+        for n, (name, data) in enumerate(files):
+            path = Path(folder) / f"{n:03d}{Path(name).suffix.lower()}"
+            path.write_bytes(data)
+            paths.append(str(path))
+        combined = Path(folder) / "combined.pdf"
+        subprocess.run([str(pdftext()), "--combine", str(combined), *paths], check=True, capture_output=True)
+        return combined.read_bytes()
 
 
 def pdftext():

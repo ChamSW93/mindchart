@@ -125,6 +125,20 @@ class Server(unittest.TestCase):
         self.assertEqual(self.request("GET", f"/api/records/documents/{filed['document_id']}")[1]["record"]["document_type"],
                          "Psychiatric Evaluation")
 
+    def test_separate_files_can_be_combined_into_one_document(self):
+        support.unlocked_vault()
+        support.ensure_pdf_reader()
+        ids = []
+        for name in ("Progress_Note_2024-08.pdf", "Court_Order_2024_scanned.pdf"):
+            ids.append(self.request("POST", f"/api/uploads?name={name}", (support.SAMPLES / name).read_bytes(),
+                                    headers={"Content-Type": "application/pdf"})[1]["id"])
+        status, combined = self.request("POST", "/api/uploads/combine", {"ids": ids})
+        self.assertEqual(status, 200)
+        uploads = {u["id"]: u for u in self.request("GET", "/api/uploads")[1]["uploads"]}
+        self.assertNotIn(ids[0], uploads)  # the separate files are gone
+        self.assertEqual((uploads[combined["id"]]["name"], uploads[combined["id"]]["pages"]), ("Progress_Note_2024-08 + 1 more.pdf", 2))
+        self.request("POST", f"/api/uploads/{combined['id']}/discard", {})
+
     def test_the_tour_is_offered_until_finished_or_skipped(self):
         support.unlocked_vault()
         self.request("POST", "/api/settings/tour", {"state": ""})

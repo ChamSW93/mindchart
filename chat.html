@@ -145,6 +145,10 @@
       if (data.error) { addBubble("assistant error", data.error); continue; }
       attachments.push(data);
       renderChips();
+      if (data.unclear && data.unclear.length) {  // usually handwriting: the text read from it may be garbled
+        addBubble("assistant error", `Parts of ${data.name} were hard to read (page ${data.unclear.join(", ")}), probably handwriting, so some words `
+          + "may be wrong and the AI may misread them. For notes, typing or dictating them works far better than photos.");
+      }
     }
   }
 
@@ -171,7 +175,8 @@
 
     // The model only sees text, so each file's contents go in front of the message.
     // They stay in the conversation, so follow-up questions about the file work too.
-    const fileText = attachments.map((f) => `<file name="${f.name}">\n${f.text}\n</file>\n\n`).join("");
+    const fileText = attachments.map((f) => `<file name="${f.name}">\n${f.unclear && f.unclear.length
+      ? "[Read from handwriting with OCR; some words are probably misread. Say when something is unclear rather than guessing.]\n" : ""}${f.text}\n</file>\n\n`).join("");
     messages.push({ role: "user", content: fileText + text });
     const userBubble = addBubble("user", text);
     if (attachments.length) {

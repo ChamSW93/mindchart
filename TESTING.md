@@ -23,7 +23,7 @@ Thank you for trying MindChart! It's an early version, so rough edges are expect
 4. When it says **Done**, MindChart opens. From then on, open it from your **Applications** folder or **Launchpad**, like any app. If it says MindChart didn't open, send a screenshot of the Terminal window.
 5. Enter your name and choose a password. Keep the password somewhere safe: if it's lost, your test records can't be recovered, not even by the developer.
 
-Updates install by themselves when you open MindChart. To quit, press ⌘Q; that also locks your records.
+Updates install by themselves when you open MindChart. **Settings → Version and updates** shows the version you have and how the last check went, with **Check for updates** and **Install now** buttons. If it can't update, paste the install line into Terminal again: your records stay as they are. To quit, press ⌘Q; that also locks your records.
 
 ## Things to try
 
@@ -36,7 +36,7 @@ MindChart starts with a short tour of each part of the app. Take it (or skip it,
    - Try **+ New type…** for a kind of document MindChart doesn't know.
    - Try a photo of a printed page (fictional records only), or a sideways scan.
 4. Watch the bottom left of the sidebar: confirmed documents are read in the background. You can keep working meanwhile.
-5. On Jordan's page, click **Build history**. Documents already read are reused, so it's quicker than before. Review the draft: check the citations, the red "disagree" boxes, and **Export to Word**.
+5. On Jordan's page, click **Write evaluation**. Type a few lines of made-up evaluation notes (what Jordan said, a mental status, an impression, diagnoses and a plan), and write the draft. Review it: check that it reads like an evaluation, that every sentence's citation is right, that the impression, diagnoses and plan are only what you wrote, and try **Export to Word**. The AI can make mistakes: tell us about anything it got wrong or made up.
 6. Open the court order, IEP and psychological evaluation from the patient's page. Check the details the AI filled in (marked **✦ AI**, with the quote it came from) and correct one with **Edit**. Changing a document's type teaches MindChart too.
 7. On Jordan's page, try the newer parts:
    - **Suggest from records** under Medications, then add the ones that are right and set their consent.

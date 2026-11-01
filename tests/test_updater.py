@@ -87,6 +87,38 @@ class Updating(unittest.TestCase):
         self.assertEqual(installed[dev].read_text(), "old app")  # and so is a development build
         self.assertFalse((system / ".MindChart.app.new").exists())
 
+    def test_the_release_page_is_used_when_githubs_api_refuses(self):
+        class Page:  # what following github.com/.../releases/latest ends at
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def geturl(self): return "https://github.com/ChamSW93/mindchart/releases/tag/v9.9.9"
+        def answer(request, timeout=None):
+            if "api.github.com" in request.full_url:
+                raise OSError("HTTP Error 403: rate limit exceeded")  # what a busy shared network can get
+            return Page()
+        real = updater.urllib.request.urlopen
+        updater.urllib.request.urlopen = answer
+        try:
+            found = updater.latest_release()
+        finally:
+            updater.urllib.request.urlopen = real
+        self.assertEqual(found["version"], "9.9.9")
+        self.assertEqual(found["zip"], "https://github.com/ChamSW93/mindchart/releases/download/v9.9.9/MindChart.zip")
+
+    def test_a_failed_check_is_recorded_with_its_reason(self):
+        real_urlopen, real_last = updater.urllib.request.urlopen, updater.LAST_CHECK
+        updater.LAST_CHECK = self.folder / "last-update-check.json"
+        def offline(request, timeout=None):
+            raise OSError("nodename nor servname provided")
+        updater.urllib.request.urlopen = offline
+        try:
+            status = updater.status()
+        finally:
+            updater.urllib.request.urlopen, updater.LAST_CHECK = real_urlopen, real_last
+        self.assertFalse(status["available"])
+        self.assertIn("Couldn't reach GitHub", status["last_check"]["result"])
+        self.assertEqual(status["last_check"]["version"], "0.1.0")
+
     def test_development_copy_never_updates(self):
         (self.folder / ".git").mkdir()
         updater.download = lambda url: self.fail("a development copy shouldn't download anything")

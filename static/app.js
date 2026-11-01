@@ -51,6 +51,7 @@ function display(object, column, value) {
   if (column === "section") return esc(state.sectionTitles[value] || value);
   if (column === "read_state") return `<span class="read-${esc(value)}">${esc(READ_STATES[value] || value)}</span>`;
   if (column === "consent") return consentBadge(value);
+  if (column === "kind") return value === "evaluation" ? "Evaluation" : "Detailed history";
   return esc(value);
 }
 
@@ -739,7 +740,7 @@ async function recordView(object, uid, editing = false) {
   const record = data.record;
   const guardian = object === "patients" && record.record_type === "Legal Guardian";
   if (editing && (object === "patients" || object === "incidents")) await loadPeople();
-  const title = object === "drafts" ? `History draft · ${String(record.created).replace("T", " ").slice(0, 16)}`
+  const title = object === "drafts" ? `${record.kind === "evaluation" ? "Evaluation draft" : "History draft"} · ${String(record.created).replace("T", " ").slice(0, 16)}`
     : object === "facts" ? (state.sectionTitles[record.section] || "Fact") : record[spec.title_field];
   $("#view").innerHTML = `
     <div class="page-head"><span class="object-icon obj-${object}"><span class="${guardian ? ICONS.guardians : ICONS[object]}"></span></span>
@@ -783,7 +784,7 @@ async function recordView(object, uid, editing = false) {
 }
 
 function factsBySection(facts, showDocument) {
-  if (!facts.length) return '<p class="empty">No facts yet. Build a history to read the documents.</p>';
+  if (!facts.length) return '<p class="empty">No facts yet. They appear as documents are read, or when you write an evaluation.</p>';
   const groups = {};
   facts.forEach((f) => (groups[f.section] = groups[f.section] || []).push(f));
   const order = Object.keys(state.sectionTitles);
@@ -922,10 +923,11 @@ function patientExtras(data, body) {
     <button class="secondary" id="uploadBtn">Upload documents</button>
     <button class="secondary" id="noteBtn">Add note</button>
     <button class="secondary" id="visitBtn">Write visit note</button>
-    <button id="buildBtn" ${documents.length ? "" : "disabled"}>Build history</button>`);
+    <button id="buildBtn">Write evaluation</button>`);
   body.insertAdjacentHTML("beforeend", `
     <div id="noteBox"></div>
     <div id="buildBox"></div>
+    ${evaluationCard(drafts)}
     <div class="card" id="followUpsCard"></div>
     <div class="card" id="incidentsCard"></div>
     <div class="card" id="medsCard"></div>
@@ -938,7 +940,7 @@ function patientExtras(data, body) {
       <div id="timelineBody"><div class="thinking"><span class="spinner"></span>Putting events in order…</div></div></details></div>
     <div class="grid2">
       <div class="card"><h2>Drafts <span class="count">${drafts.length}</span></h2>
-        ${drafts.length ? recordsTable("drafts", drafts, ["created", "updated", "model"]) : '<p class="empty">No drafts yet.</p>'}</div>
+        ${drafts.length ? recordsTable("drafts", drafts, ["kind", "created", "updated", "model"]) : '<p class="empty">No drafts yet.</p>'}</div>
       <div class="card"><h2>Activity</h2>${activity.length ? recordsTable("activity", activity.slice(0, 15), ["time", "action", "detail"]) : '<p class="empty">None.</p>'}</div>
     </div>`);
   body.insertAdjacentHTML("afterbegin", glance(data));
@@ -1497,18 +1499,50 @@ function visitNoteForm(data) {
   };
 }
 
+// Shown wherever the AI drafts an evaluation: before it runs, on every draft, and in the Word file.
+const AI_WARNING = `<div class="ai-warning"><b>⚠ AI draft: check everything.</b> The AI on this Mac can leave things out and can state
+  things the records don't say ("hallucinate"). Check every sentence against the source it cites before using any of it.
+  Diagnoses and recommendations come only from your own notes, never from the AI.</div>`;
+
+// The patient's latest psychiatric evaluation draft, near the top of their page
+function evaluationCard(drafts) {
+  const latest = drafts.find((d) => d.kind === "evaluation");
+  return `<div class="card evaluation-card"><h2>Psychiatric evaluation
+      <span class="actions"><button class="${latest ? "secondary " : ""}small" data-write-evaluation>${latest ? "Write a new draft" : "Write evaluation"}</button></span></h2>
+    ${latest ? `<p>Latest draft: ${recordLink(latest.id, `${esc(String(latest.created).replace("T", " ").slice(0, 16))}`)}
+      <span class="muted small">· written by ${esc(latest.model)}${latest.updated ? ` · edited ${esc(String(latest.updated).replace("T", " ").slice(0, 16))}` : ""}</span></p>
+      <p class="muted small">An AI draft: open it to check each sentence against its sources before using it.</p>`
+      : `<p class="empty">No evaluation yet. Add the records and your evaluation notes (upload, type or dictate them), then click Write evaluation.
+        MindChart drafts the whole evaluation from them, citing a source for every sentence.</p>`}</div>`;
+}
+
 function buildPanel(uid, documents) {
-  $("#buildBox").innerHTML = `<div class="card"><h2>Build a history draft</h2>
-    <p class="muted small">Documents already read (in the background, or by an earlier draft) are reused, so only the rest take time. Corrections you've made to facts are used.</p>
-    <div class="doc-pick">${documents.map((d) => `<label><input type="checkbox" value="${esc(d.id)}" checked> ${esc(d.name)}
-      <span class="muted small">${esc(d.document_type || "type not known yet")} · ${esc(READ_STATES[d.read_state] || "not read yet")}</span></label>`).join("")}</div>
+  $("#buildBox").innerHTML = `<div class="card"><h2>Write a psychiatric evaluation</h2>
+    ${AI_WARNING}
+    <h3>1. Sources</h3>
+    <p class="muted small">Everything ticked feeds the evaluation. Documents already read are reused, so only the rest take time, and
+      your corrections to facts are used. Your own <b>Evaluation notes</b> (uploaded, typed or dictated) supply today's interview,
+      mental status, risk, impression, diagnoses and plan.</p>
+    ${documents.length ? `<div class="doc-pick">${documents.map((d) => `<label><input type="checkbox" value="${esc(d.id)}" checked> ${esc(d.name)}
+      <span class="muted small">${esc(d.document_type || "type not known yet")} · ${esc(READ_STATES[d.read_state] || "not read yet")}</span></label>`).join("")}</div>`
+      : '<p class="empty">No documents yet: upload records, or type your notes below.</p>'}
+    <h3>2. Your evaluation notes <span class="muted small">(optional if you've uploaded them)</span></h3>
+    <p class="muted small">What you found at this evaluation: what the youth and others said, your observations, mental status, risk,
+      impressions, diagnoses and plan. Type or paste them, or dictate with your Mac's dictation (press the microphone key, or Fn twice).
+      They're saved to the patient's documents as Evaluation notes.</p>
+    <textarea id="evalNotes" rows="6" placeholder="Seen with foster mother. Reports sleep improved, nightmares 1x/week…"></textarea>
+    <h3>3. Draft</h3>
+    <div class="row"><label><input type="radio" name="buildKind" value="evaluation" checked> <b>Psychiatric evaluation</b>
+        <span class="muted small">concise, written as you'd write it</span></label>
+      <label><input type="radio" name="buildKind" value="history"> <b>Detailed history</b> <span class="muted small">everything the records say, section by section</span></label></div>
     <label class="small muted"><input type="checkbox" id="reread"> Re-read documents already read</label>
-    <div class="actions" style="margin-top:12px"><button id="startBuild">Start</button></div>
+    <div class="actions" style="margin-top:12px"><button id="startBuild">Write the draft</button></div>
     <div id="buildProgress" hidden><progress id="bar" value="0" max="1"></progress><div id="buildStatus" class="muted small"></div><div id="buildWarnings"></div></div></div>`;
   $("#buildBox").scrollIntoView({ behavior: "smooth" });
   $("#startBuild").onclick = async () => {
     const docIds = [...$("#buildBox").querySelectorAll(".doc-pick input:checked")].map((i) => i.value);
-    if (!docIds.length) return;
+    const notes = $("#evalNotes").value.trim(), kind = $("#buildBox").querySelector("[name=buildKind]:checked").value;
+    if (!docIds.length && !(notes && kind === "evaluation")) return;
     $("#startBuild").disabled = true;
     $("#buildProgress").hidden = false;
     aiBusy(true);
@@ -1516,7 +1550,7 @@ function buildPanel(uid, documents) {
     let firstAt = null, firstStep = 0;
     try {
       const res = await fetch(`/api/patients/${uid}/history`, { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ doc_ids: docIds, model: modelChoice(), reread: $("#reread").checked }) });
+        body: JSON.stringify({ doc_ids: docIds, model: modelChoice(), reread: $("#reread").checked, kind, notes }) });
       if (!res.headers.get("Content-Type").includes("ndjson")) throw new Error((await res.json()).error);
       await readStream(res, (u) => {
         if (u.error) throw new Error(u.error);
@@ -1548,11 +1582,16 @@ function documentExtras(data, body) {
 function draftView(data, body) {
   const result = data.result;
   const uid = data.record.id;
+  const evaluation = result.kind === "evaluation";
   body.innerHTML = `
-    <div class="card"><h2>Review the draft <span class="muted small" style="font-family:var(--sans)">for ${recordLink(data.record.patient_id, esc(data.record.patient))}</span>
+    ${AI_WARNING}
+    <div class="card"><h2>${evaluation ? "Review the evaluation draft" : "Review the draft"} <span class="muted small" style="font-family:var(--sans)">for ${recordLink(data.record.patient_id, esc(data.record.patient))}</span>
       <span class="actions"><span id="saveMsg" class="muted small"></span><button class="secondary small" id="saveDraft">Save changes</button><button class="small" id="exportDraft">Export to Word</button></span></h2>
       <p class="muted small">Edit any section. Citations like <b>[D2 p.4]</b> mean document 2, page 4. Red boxes flag where documents disagree.
         Facts whose quote couldn't be found in the source are marked <span class="badge bad">not verified</span> and left out.</p>
+      ${(result.header || []).length ? `<h3>Identifying Information <span class="muted small">from the patient's record</span></h3>
+        <div class="fields" style="margin-bottom:14px">${result.header.map(([label, value]) =>
+        `<div class="field"><label>${esc(label)}</label><div class="value">${esc(value)}</div></div>`).join("")}</div>` : ""}
       <div class="table-wrap"><table><thead><tr><th></th><th>File</th><th>Type</th><th>Date</th><th>Author</th></tr></thead><tbody>
         ${result.documents.map((d) => `<tr><td><b>${d.label}</b></td><td>${esc(d.name)}${scanNote(d)}</td>
           <td>${esc(d.type)}</td><td>${esc(d.date)}</td><td>${esc(d.author)}</td></tr>`).join("")}</tbody></table></div></div>
@@ -1584,13 +1623,14 @@ function draftView(data, body) {
   };
   $("#saveDraft").onclick = () => save().catch((err) => $("#saveMsg").textContent = err.message);
   $("#exportDraft").onclick = async () => {
-    if (!state.exportWarned && !confirm("The Word file won't be encrypted once it leaves MindChart. Save it only where your organization allows patient records. Continue?")) return;
+    if (!state.exportWarned && !confirm("The Word file won't be encrypted once it leaves MindChart: save it only where your organization allows patient records. "
+      + "It's an AI draft marked as not reviewed, so check every sentence against its sources before using it. Continue?")) return;
     state.exportWarned = true;
     if (state.dirtyDraft) await save();
-    const res = await api("POST", "export", { sections: result.sections, documents: result.documents, draft_id: uid });
+    const res = await api("POST", "export", { sections: result.sections, documents: result.documents, draft_id: uid, kind: result.kind, header: result.header });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(await res.blob());
-    link.download = `History draft - ${data.record.patient}.docx`;
+    link.download = `${evaluation ? "Psychiatric evaluation draft" : "History draft"} - ${data.record.patient}.docx`;
     link.click();
     URL.revokeObjectURL(link.href);
   };
@@ -1638,7 +1678,7 @@ async function settingsView() {
       <div class="field"><label>Activity log</label><div class="value">${status(s.audit.ok, `Intact, ${s.audit.entries} entries checked`, `Altered at entry ${esc(s.audit.problem_at || "")}`)}</div></div>
       <div class="field wide"><label>Records are stored in</label><div class="value small">${esc(s.data_location)}</div></div>
       <div class="field wide"><label>Error log (no patient details; send this if something goes wrong)</label><div class="value small">${esc(s.log_file)}</div></div>
-      <div class="field"><label>Version</label><div class="value">${esc(s.version.current)}</div></div>
+      <div class="field wide"><label>Version and updates</label><div class="value" id="updateBox"></div></div>
       <div class="field"><label>ZIP code data</label><div class="value small">GeoNames (geonames.org), CC BY 4.0, built in: nothing is looked up online</div></div>
     </div>
     <div class="actions" style="margin-top:14px"><button class="secondary small" id="exportAudit">Export activity log (CSV)</button>
@@ -1656,6 +1696,7 @@ async function settingsView() {
     catch (err) { $("#nameForm .error").textContent = err.message; }
   };
   touchIdCard(touchId);
+  updateBox(s.version);
   $("#passwordForm").onsubmit = async () => {
     const v = formValues($("#passwordForm"));
     if (v.new !== v.again) { $("#passwordForm .error").textContent = "The new passwords don't match."; return; }
@@ -1670,6 +1711,24 @@ async function settingsView() {
     link.click();
     URL.revokeObjectURL(link.href);
   };
+}
+
+// Updates: MindChart installs them by itself when it opens; this shows how the last check went and can do it now.
+function updateBox(v) {
+  const box = $("#updateBox"), last = v.last_check;
+  const checked = last ? `${esc(last.result)} <span class="muted small">(${esc(String(last.time).replace("T", " "))})</span>` : "Not checked yet";
+  box.innerHTML = v.installed
+    ? `<b class="status-ok">Version ${esc(v.installed)} is installed.</b> Quit MindChart (⌘Q) and open it again to finish.`
+    : `${esc(v.current)} · ${checked}
+      <div class="actions" style="margin-top:8px"><button class="secondary small" data-check>Check for updates</button>
+        ${v.available ? `<button class="small" data-install>Install version ${esc(v.latest)} now</button>` : ""}<span class="error"></span></div>`;
+  const run = async (button, path, busy) => {
+    button.disabled = true;
+    box.querySelector(".error").innerHTML = `<span class="thinking"><span class="spinner"></span>${busy}</span>`;
+    try { updateBox(await api("POST", path)); } catch (err) { box.querySelector(".error").textContent = err.message; button.disabled = false; }
+  };
+  box.querySelector("[data-check]")?.addEventListener("click", (e) => run(e.target, "update/check", "Checking…"));
+  box.querySelector("[data-install]")?.addEventListener("click", (e) => run(e.target, "update/install", "Downloading and installing…"));
 }
 
 // Touch ID: off until turned on here, and the password still works either way
@@ -1800,8 +1859,20 @@ async function uploadsView() {
       the background, ready for drafting, and each confirmation teaches MindChart to recognize that kind of document.</p>
     <p class="secure-note left"><span class="i-lock secure-icon"></span> Uploaded files stay on this Mac, inside your encrypted records.
       Nothing is sent over the internet.</p>
+    <div class="card combine-bar" id="combineBar" hidden><span id="combineText"></span>
+      <button class="small" id="combineBtn" disabled>Combine into one document</button></div>
     <div id="uploadCards"></div>`;
   $("#addFiles").onclick = () => pickFiles();
+  $("#uploadCards").addEventListener("change", (e) => { if (e.target.matches("[data-combine]")) updateCombineBar(); });
+  $("#combineBtn").onclick = async () => {
+    const ids = [...document.querySelectorAll(".upload-card [data-combine]:checked")].map((box) => box.closest(".upload-card").dataset.upload);
+    $("#combineBtn").disabled = true;
+    try { await api("POST", "uploads/combine", { ids }); toast("Combined into one document ✓"); }
+    catch (err) { toast(err.message, 5000); }
+    state.uploads = await api("GET", "uploads");
+    $("#uploadCards").innerHTML = "";
+    renderUploadCards();
+  };
   $("#confirmReady").onclick = confirmReady;
   renderUploadCards();
 }
@@ -1828,6 +1899,7 @@ function renderUploadCards() {
     anywhere in MindChart to add them.</p></div>`;
   $("#uploadCount").textContent = uploads.length;
   const ready = readyUploads();
+  updateCombineBar();
   $("#confirmReady").hidden = !ready.length;
   $("#confirmReady").textContent = `Confirm ${ready.length} that ${ready.length === 1 ? "is" : "are"} ready`;
 }
@@ -1842,6 +1914,19 @@ async function syncUploadCards(redrawAll = false) {
     if (card.dataset.touched) noteAiResult(card, u); else replaceCard(card, u);
   }
   renderUploadCards();
+}
+
+// Several photos (or PDFs) that are pages of one document, such as handwritten notes, can be read as one.
+const combinable = (name) => /\.(pdf|png|jpe?g|heic|heif|tiff?|gif|bmp)$/i.test(name);
+function updateCombineBar() {
+  const bar = $("#combineBar");
+  if (!bar) return;
+  const can = (state.uploads?.uploads || []).filter((u) => combinable(u.name)).length;
+  const chosen = document.querySelectorAll(".upload-card [data-combine]:checked").length;
+  bar.hidden = can < 2;
+  $("#combineText").innerHTML = chosen >= 2 ? `<b>${chosen} files</b> will become one document, in the order shown.`
+    : "Several photos or scans of one document, such as pages of handwritten notes? Tick <b>Part of one document</b> on each, then combine them so they're read as one.";
+  $("#combineBtn").disabled = chosen < 2;
 }
 
 function replaceCard(card, u) {
@@ -1868,6 +1953,7 @@ function uploadCard(u) {
   return `<form class="card upload-card" data-upload="${esc(u.id)}" onsubmit="return false">
     <div class="upload-head"><span class="object-icon obj-documents"><span class="i-documents"></span></span>
       <div class="grow"><b>${esc(u.name)}</b><div class="muted small">${reading}</div></div>
+      ${combinable(u.name) ? '<label class="combine-pick small muted"><input type="checkbox" data-combine> Part of one document</label>' : ""}
       <span class="identifying" ${s.ai_done ? "hidden" : ""}><span class="spinner"></span>The AI is reading it…</span></div>
     ${s.warning ? `<div class="conflict">⚠ ${esc(s.warning)}</div>` : ""}
     ${s.ai_error ? `<div class="conflict">${esc(s.ai_error)}</div>` : ""}
