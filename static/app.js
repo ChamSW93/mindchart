@@ -51,7 +51,8 @@ function display(object, column, value) {
   if (column === "section") return esc(state.sectionTitles[value] || value);
   if (column === "read_state") return `<span class="read-${esc(value)}">${esc(READ_STATES[value] || value)}</span>`;
   if (column === "consent") return consentBadge(value);
-  if (column === "kind") return value === "evaluation" ? "Evaluation" : "Detailed history";
+  if (object === "facts" && column === "status") return { current: '<span class="when current">current</span>', earlier: '<span class="when earlier">earlier</span>' }[value] || esc(value);
+  if (object === "drafts" && column === "kind") return value === "evaluation" ? "Evaluation" : "Detailed history";
   return esc(value);
 }
 
@@ -781,6 +782,45 @@ async function recordView(object, uid, editing = false) {
   if (object === "patients") (guardian ? guardianExtras : patientExtras)(data, body);
   if (object === "cottages") cottageExtras(data, body);
   if (object === "documents") documentExtras(data, body);
+  if (object === "facts" && data.record.status) body.insertAdjacentHTML("afterbegin", `<div class="card"><h2>When it was true</h2><p>${whenChip(data.record)}
+    ${{ current: "The newest information MindChart has on this topic, so evaluations treat it as current.",
+        earlier: `A newer record${data.record.newer ? ` (${esc(data.record.newer)})` : ""} covers this topic, so evaluations treat this as past, not current.`,
+        event: "Something that happened at one point in time.", background: "Background that doesn't change." }[data.record.status] || ""}</p>
+    <p class="muted small">Not right? Edit the kind (event, ongoing or background), the topic or the date. MindChart learns from your correction.</p></div>`);
+  $("#checkPages")?.addEventListener("click", () => reviewPages("documents", uid, () => recordView(object, uid)));
+}
+
+// When a fact was true. Ongoing facts (grade, placement, a dose) are current if they're the newest on their topic, and
+// earlier if a newer record covers it; events show their date. Worked out from the records' dates (picture.py).
+function whenChip(f) {
+  if (f.status === "current") return `<span class="when current" title="The newest information on this">as of ${esc(f.as_of || "an unknown date")}</span>`;
+  if (f.status === "earlier") return `<span class="when earlier" title="${f.newer ? `Replaced by a newer record (${esc(f.newer)})` : "Newer records cover this"}">earlier${f.as_of ? ` · ${esc(f.as_of)}` : ""}</span>`;
+  if (f.status === "event") return f.as_of ? `<span class="when">${esc(f.as_of)}</span>` : "";
+  if (f.status === "background") return '<span class="when">background</span>';
+  return f.document_date ? `<span class="when">record of ${esc(f.document_date)}</span>` : "";
+}
+
+// The newest information on each topic (school, home and legal, treatment, how they're doing), with what earlier records
+// said under it. Verified facts only, as in drafts.
+function currentPicture(facts) {
+  const ongoing = facts.filter((f) => f.verified && f.group && (f.status === "current" || f.status === "earlier"));
+  if (!ongoing.some((f) => f.status === "current")) return "";
+  const groups = {};
+  for (const f of ongoing) {
+    const topics = groups[f.group] = groups[f.group] || {};
+    (topics[f.topic_key || `fact ${f.id}`] = topics[f.topic_key || `fact ${f.id}`] || []).push(f);
+  }
+  const pending = facts.some((f) => f.kind === null);
+  return `<div class="card picture-card"><h2>Current picture <span class="muted small" style="font-family:var(--sans)">the newest information on each topic</span></h2>
+    <p class="muted small">Worked out from the records' dates: when records from different years differ (say, 10th grade in 2023 and 11th grade in 2024),
+      the newest is current and the older one is earlier. Evaluations are written this way too. Check it before writing one, and open a fact to correct it.
+      ${pending ? "<b>Facts from before this was added are still being dated in the background.</b>" : ""}</p>
+    <div class="picture-groups">${["School", "Home and legal", "Treatment", "How they're doing"].filter((g) => groups[g]).map((g) => `
+      <div class="picture-group"><h3>${esc(g)}</h3>${Object.values(groups[g]).map((list) => {
+        const current = list.filter((f) => f.status === "current"), earlier = list.filter((f) => f.status === "earlier");
+        return current.length ? `<div class="picture-topic">${current.map((f) => `<div>${recordLink(f.id, esc(f.fact))} <span class="when current">as of ${esc(f.as_of || "?")}</span></div>`).join("")}
+          ${earlier.length ? `<div class="muted small">Earlier: ${earlier.map((f) => `${recordLink(f.id, esc(f.fact))} (${esc(f.as_of || "undated")})`).join("; ")}</div>` : ""}</div>` : "";
+      }).join("")}</div>`).join("")}</div></div>`;
 }
 
 function factsBySection(facts, showDocument) {
@@ -790,7 +830,7 @@ function factsBySection(facts, showDocument) {
   const order = Object.keys(state.sectionTitles);
   return Object.keys(groups).sort((a, b) => order.indexOf(a) - order.indexOf(b)).map((section) => `
     <details class="section-group"><summary>${esc(state.sectionTitles[section] || section)} <span class="badge plain">${groups[section].length}</span></summary>
-      ${groups[section].map((f) => `<div class="fact">${recordLink(f.id, "")}${esc(f.fact)}
+      ${groups[section].map((f) => `<div class="fact ${f.status === "earlier" ? "earlier" : ""}">${recordLink(f.id, "")}${whenChip(f)}${esc(f.fact)}
         ${f.verified ? "" : ' <span class="badge bad">not verified</span>'}
         <span class="quote">“${esc(f.quote)}”${showDocument ? ` · ${recordLink(f.document_id, esc(f.document))}` : ""}${f.page ? ` p.${f.page}` : ""}
         · ${recordLink(f.id, "open")}</span></div>`).join("")}
@@ -928,6 +968,7 @@ function patientExtras(data, body) {
     <div id="noteBox"></div>
     <div id="buildBox"></div>
     ${evaluationCard(drafts)}
+    ${currentPicture(facts)}
     <div class="card" id="followUpsCard"></div>
     <div class="card" id="incidentsCard"></div>
     <div class="card" id="medsCard"></div>
@@ -950,6 +991,7 @@ function patientExtras(data, body) {
   renderMeds(uid, medications);
   renderMeasures(uid, measures);
   $("#timeline").addEventListener("toggle", () => { if ($("#timeline").open) loadTimeline(uid); });
+  resumeBuild(uid);
 
   $("#uploadBtn").onclick = () => pickFiles(uid);
   $("#visitBtn").onclick = () => visitNoteForm(data);
@@ -1545,36 +1587,156 @@ function buildPanel(uid, documents) {
     if (!docIds.length && !(notes && kind === "evaluation")) return;
     $("#startBuild").disabled = true;
     $("#buildProgress").hidden = false;
-    aiBusy(true);
-    const started = Date.now();
-    let firstAt = null, firstStep = 0;
     try {
-      const res = await fetch(`/api/patients/${uid}/history`, { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ doc_ids: docIds, model: modelChoice(), reread: $("#reread").checked, kind, notes }) });
-      if (!res.headers.get("Content-Type").includes("ndjson")) throw new Error((await res.json()).error);
-      await readStream(res, (u) => {
-        if (u.error) throw new Error(u.error);
-        if (u.warning) { $("#buildWarnings").insertAdjacentHTML("beforeend", `<div class="error small">${esc(u.warning)}</div>`); return; }
-        $("#bar").max = u.total; $("#bar").value = u.step;
-        if (firstAt === null && u.step > 0) { firstAt = Date.now(); firstStep = u.step; }
-        let eta = "";
-        if (firstAt && u.step > firstStep) eta = ` · about ${Math.max(1, Math.round((Date.now() - firstAt) / 60000 / (u.step - firstStep) * (u.total - u.step)))} min left`;
-        const s = (Date.now() - started) / 1000;
-        $("#buildStatus").textContent = `${u.progress || "Done"} · ${Math.floor(s / 60)}m ${Math.round(s % 60)}s${u.result ? "" : eta}`;
-        if (u.result) location.hash = `#/r/drafts/${u.draft_id}`;
-      });
+      const { build_id } = await api("POST", `patients/${uid}/history`, { doc_ids: docIds, model: modelChoice(), reread: $("#reread").checked, kind, notes });
+      await followBuild(build_id);
     } catch (err) {
       $("#buildStatus").innerHTML = `<span class="error">${esc(err.message)}</span>`;
-      $("#startBuild").disabled = false;
     }
-    aiBusy(false);
+    $("#startBuild").disabled = false;
   };
 }
 
+// Follow a draft being written on this Mac, checking every couple of seconds, until it opens. The writing goes on even if
+// the page loses touch (the Mac napping, the window reloading), so a failed check is just tried again.
+async function followBuild(id) {
+  const token = state.following = {}; // only the latest follower carries on (the page may have been left and reopened)
+  const started = Date.now();
+  let firstAt = null, firstStep = 0, shownWarnings = 0, lostSince = null;
+  aiBusy(true);
+  try {
+    while (true) {
+      let job;
+      try {
+        job = await api("GET", `builds/${id}`);
+        lostSince = null;
+      } catch (err) {
+        if (!(err instanceof TypeError)) throw err; // a real answer (say, locked), not a dropped connection
+        lostSince = lostSince || Date.now();
+        if (Date.now() - lostSince > 30 * 60000) throw new Error("Lost touch with MindChart. The draft may still appear under the patient's drafts.");
+        $("#buildStatus").textContent = "Lost touch with MindChart for a moment; trying again…";
+        await new Promise((r) => setTimeout(r, 3000));
+        continue;
+      }
+      if (!$("#buildProgress") || state.following !== token) return; // left the page; the job carries on, and the patient's page picks it up again
+      job.warnings.slice(shownWarnings).forEach((w) => $("#buildWarnings").insertAdjacentHTML("beforeend", `<div class="error small">${esc(w)}</div>`));
+      shownWarnings = job.warnings.length;
+      if (job.error) throw new Error(job.error);
+      if (job.draft_id) { location.hash = `#/r/drafts/${job.draft_id}`; return; }
+      if (job.done) throw new Error("The draft wasn't finished. Try writing it again.");
+      $("#bar").max = job.total; $("#bar").value = job.step;
+      if (firstAt === null && job.step > 0) { firstAt = Date.now(); firstStep = job.step; }
+      let eta = "";
+      if (firstAt && job.step > firstStep) eta = ` · about ${Math.max(1, Math.round((Date.now() - firstAt) / 60000 / (job.step - firstStep) * (job.total - job.step)))} min left`;
+      const s = (Date.now() - started) / 1000;
+      $("#buildStatus").textContent = `${job.progress} · ${Math.floor(s / 60)}m ${Math.round(s % 60)}s${eta}`;
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } finally {
+    aiBusy(false);
+  }
+}
+
+// A draft still being written for this patient (say, the page was reloaded meanwhile) is shown being written.
+async function resumeBuild(uid) {
+  let found;
+  try { found = (await api("GET", `builds?patient=${encodeURIComponent(uid)}`)).build; } catch { return; }
+  if (!found || $("#buildProgress")) return;
+  $("#buildBox").innerHTML = `<div class="card"><h2>Writing the ${found.kind === "evaluation" ? "evaluation" : "detailed history"}…</h2>
+    <p class="muted small">It carries on while you use the rest of MindChart, and opens here when it's done.</p>
+    <div id="buildProgress"><progress id="bar" value="0" max="1"></progress><div id="buildStatus" class="muted small"></div><div id="buildWarnings"></div></div></div>`;
+  followBuild(found.id).catch((err) => { if ($("#buildStatus")) $("#buildStatus").innerHTML = `<span class="error">${esc(err.message)}</span>`; });
+}
+
 function documentExtras(data, body) {
+  const p = data.pages, unclear = p.unclear_pages.filter((n) => n !== null), checked = p.checked_pages.filter((n) => n !== null);
+  const reading = data.record.read_state === "queued" ? '<span class="read-queued">Being read again with your corrections</span>' : "";
+  if (p.pages) body.insertAdjacentHTML("beforeend", `
+    <div class="card"><h2>Pages <span class="count">${p.pages}</span>
+      <span class="actions"><button class="${unclear.length ? "" : "secondary "}small" id="checkPages">${unclear.length ? "Check hard-to-read pages" : "Check pages against the original"}</button></span></h2>
+      <p class="muted small">${[p.scanned_pages.length ? `Read with OCR: page ${p.scanned_pages.join(", ")}` : "Text taken from the file itself",
+        unclear.length ? `<b class="warn">hard to read: page ${unclear.join(", ")}</b>` : "",
+        checked.length ? `checked by you: page ${checked.join(", ")}` : "", reading].filter(Boolean).join(" · ")}</p>
+      <p class="muted small">Compare each page's picture with the text MindChart read, and correct anything misread, such as handwriting.
+        The document is then read again from your text. Facts you've edited by hand are kept.</p></div>`);
   body.insertAdjacentHTML("beforeend", `
     <div class="card"><h2>Facts found <span class="count">${data.related.facts.length}</span></h2>${factsBySection(data.related.facts, false)}</div>
     <div class="card"><h2>Text</h2><details><summary class="muted">Show the document's text</summary><div class="text-preview">${esc(data.text)}</div></details></div>`);
+}
+
+// --- Checking a page against the original ------------------------------------------
+
+// Each page's picture beside the text MindChart read from it, to correct what handwriting or a poor copy turned into.
+// Hard-to-read pages come first. kind: "uploads" or "documents". onSaved runs on closing, if any page was saved.
+async function reviewPages(kind, id, onSaved) {
+  let info;
+  try { info = await api("GET", `${kind}/${encodeURIComponent(id)}/pages`); } catch (err) { return toast(err.message, 5000); }
+  const pages = [...info.pages].sort((a, b) => (!!b.unclear - !!a.unclear) || a.page - b.page);
+  if (!pages.length) return toast("This file has no pages to check");
+  let index = 0, picture = null, saved = false;
+  document.body.insertAdjacentHTML("beforeend", `<div class="page-review" id="pageReview" role="dialog" aria-modal="true" aria-labelledby="prTitle">
+    <div class="page-review-box">
+      <div class="page-review-head"><div class="grow"><h2 id="prTitle">Check the text against the page</h2><div class="muted small">${esc(info.name)}</div></div>
+        <select id="prPick" aria-label="Page"></select><button class="secondary small" id="prClose">Done</button></div>
+      <p class="muted small">Correct anything misread so the text matches the page, then save. MindChart uses your text from now on
+        ${kind === "uploads" ? "and identifies the file again." : "and reads the document again (facts you've edited by hand are kept)."}
+        Click the picture to zoom in.</p>
+      <div class="page-review-body">
+        <div class="page-picture" id="prPicture"></div>
+        <div class="page-text"><textarea id="prText" spellcheck="true" aria-label="The page's text"></textarea>
+          <div class="actions"><span class="muted small" id="prMsg"></span><span class="grow"></span>
+            <button class="secondary small" id="prPrev">Previous</button><button class="small" id="prSave">Save and next</button></div></div>
+      </div></div></div>`);
+  const box = $("#pageReview");
+  const label = (p) => `Page ${p.page}${p.checked ? " · checked ✓" : p.unclear ? " · hard to read" : ""}`;
+  const fillPick = () => { $("#prPick").innerHTML = pages.map((p, i) => `<option value="${i}">${label(p)}</option>`).join(""); $("#prPick").value = index; };
+  const unsaved = () => $("#prText").value.trim() !== pages[index].text.trim();
+  const show = async (i) => {
+    index = i;
+    const p = pages[i];
+    fillPick();
+    $("#prText").value = p.text;
+    $("#prMsg").textContent = p.checked ? "Checked ✓" : p.unclear ? "Hard to read: check it carefully" : "";
+    $("#prPrev").disabled = i === 0;
+    $("#prSave").textContent = i === pages.length - 1 ? "Save" : "Save and next";
+    if (!info.viewable) { $("#prPicture").innerHTML = '<p class="muted">There\'s no picture of this page to show.</p>'; return; }
+    $("#prPicture").innerHTML = '<span class="spinner"></span> <span class="muted small">Loading the page…</span>';
+    try {
+      const res = await api("GET", `${kind}/${encodeURIComponent(id)}/page/${p.page}`);
+      const blob = await res.blob();
+      if (index !== i || !document.body.contains(box)) return; // moved on while it loaded
+      if (picture) URL.revokeObjectURL(picture);
+      picture = URL.createObjectURL(blob);
+      $("#prPicture").innerHTML = `<img src="${picture}" alt="Page ${p.page} of the original">`;
+    } catch (err) { $("#prPicture").innerHTML = `<p class="error">${esc(err.message)}</p>`; }
+  };
+  const go = (i) => { if (i === index || !unsaved() || confirm("Leave this page without saving your changes?")) show(i); else $("#prPick").value = index; };
+  const close = () => {
+    if (unsaved() && !confirm("Close without saving your changes to this page?")) return;
+    box.remove();
+    if (picture) URL.revokeObjectURL(picture);
+    document.removeEventListener("keydown", onKey);
+    if (saved && onSaved) onSaved();
+  };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  $("#prPick").onchange = () => go(+$("#prPick").value);
+  $("#prPrev").onclick = () => go(index - 1);
+  $("#prClose").onclick = close;
+  $("#prPicture").onclick = (e) => { if (e.target.tagName === "IMG") $("#prPicture").classList.toggle("zoomed"); };
+  $("#prSave").onclick = async () => {
+    const p = pages[index];
+    $("#prSave").disabled = true;
+    try {
+      await api("POST", `${kind}/${encodeURIComponent(id)}/page/${p.page}`, { text: $("#prText").value });
+      Object.assign(p, { text: $("#prText").value.trim(), checked: true, unclear: false });
+      saved = true;
+      if (index < pages.length - 1) await show(index + 1);
+      else { fillPick(); $("#prMsg").textContent = "Saved ✓ That was the last page."; }
+    } catch (err) { $("#prMsg").textContent = err.message; }
+    $("#prSave").disabled = false;
+  };
+  show(0);
 }
 
 // --- Drafts ------------------------------------------------------------------------
@@ -1595,6 +1757,13 @@ function draftView(data, body) {
       <div class="table-wrap"><table><thead><tr><th></th><th>File</th><th>Type</th><th>Date</th><th>Author</th></tr></thead><tbody>
         ${result.documents.map((d) => `<tr><td><b>${d.label}</b></td><td>${esc(d.name)}${scanNote(d)}</td>
           <td>${esc(d.type)}</td><td>${esc(d.date)}</td><td>${esc(d.author)}</td></tr>`).join("")}</tbody></table></div></div>
+    ${evaluation && result.sections.some((s) => s.ai_narrative !== undefined) ? `<div class="card learn-card" id="learnCard" hidden>
+      <h2>Teach MindChart your writing style</h2>
+      <p class="muted small">MindChart can look at how you changed this draft and suggest a few general habits to follow in every
+        evaluation it writes (for example, how you word things or what you put first). It never keeps details about this patient,
+        and nothing is kept until you approve it. You can change what it learned in Settings.</p>
+      <div class="actions"><button class="small" id="learnBtn">Suggest from my edits</button><span class="muted small" id="learnMsg"></span></div>
+      <div id="learnList"></div></div>` : ""}
     ${result.sections.map((s, i) => {
       const blank = !s.facts.some((f) => f.verified);
       const unverified = s.facts.filter((f) => !f.verified).length;
@@ -1602,7 +1771,7 @@ function draftView(data, body) {
         <textarea data-section="${i}" rows="3">${esc(s.narrative)}</textarea>
         ${s.conflicts.map((c) => `<div class="conflict">⚠ ${esc(c.description)} ${c.sources ? `[${esc(c.sources)}]` : ""}</div>`).join("")}
         ${s.facts.length ? `<details><summary class="muted small">Facts found (${s.facts.length})${unverified ? ` · ${unverified} not verified` : ""}</summary>
-          ${s.facts.map((f) => `<div class="fact"><b class="ok">[${esc(f.source)}]</b> ${f.date ? esc(f.date) + ": " : ""}${esc(f.fact)}
+          ${s.facts.map((f) => `<div class="fact ${f.status === "earlier" ? "earlier" : ""}"><b class="ok">[${esc(f.source)}]</b> ${f.status ? whenChip(f) : f.date ? esc(f.date) + ": " : ""}${esc(f.fact)}
             ${f.verified ? "" : '<span class="badge bad">not verified</span>'}<span class="quote">“${esc(f.quote)}”</span></div>`).join("")}</details>` : ""}
       </div>`;
     }).join("")}`;
@@ -1615,11 +1784,40 @@ function draftView(data, body) {
     $("#saveMsg").textContent = "Unsaved changes";
     autosize(e.target);
   };
+  // Offered once the clinician has saved edits to an evaluation the AI wrote.
+  const edited = () => result.sections.some((s) => s.ai_narrative !== undefined && s.narrative.trim() !== s.ai_narrative.trim());
+  const showLearn = () => { if ($("#learnCard")) $("#learnCard").hidden = !edited(); };
   const save = async () => {
     await api("POST", `drafts/${uid}`, { result });
     state.dirtyDraft = false;
     $("#saveMsg").textContent = "";
     toast("Draft saved ✓");
+    showLearn();
+  };
+  showLearn();
+  if ($("#learnBtn")) $("#learnBtn").onclick = async () => {
+    $("#learnBtn").disabled = true;
+    $("#learnList").innerHTML = "";
+    $("#learnMsg").innerHTML = '<span class="spinner"></span> Comparing your version with the AI\'s (this can take a minute)…';
+    aiBusy(true);
+    try {
+      if (state.dirtyDraft) await save();
+      const { suggestions } = await api("POST", `drafts/${uid}/learn`, { model: modelChoice() });
+      $("#learnMsg").textContent = suggestions.length ? "Untick any that aren't right, or reword them, then keep the rest."
+        : "Nothing general to learn from these edits (changes to this patient's facts aren't kept).";
+      $("#learnList").innerHTML = suggestions.length ? `<div class="learn-list">${suggestions.map((t) =>
+        `<label class="learn-item"><input type="checkbox" checked><input type="text" value="${esc(t)}" maxlength="300"></label>`).join("")}</div>
+        <div class="actions"><button class="small" id="keepLearned">Keep the ticked ones</button></div>` : "";
+      if ($("#keepLearned")) $("#keepLearned").onclick = async () => {
+        const texts = [...$("#learnList").querySelectorAll(".learn-item")].filter((row) => row.querySelector("[type=checkbox]").checked)
+          .map((row) => row.querySelector("[type=text]").value.trim()).filter(Boolean);
+        const { added } = await api("POST", "learned/preferences", { texts });
+        $("#learnList").innerHTML = "";
+        $("#learnMsg").textContent = added.length ? `Kept ${added.length}. MindChart follows ${added.length === 1 ? "it" : "them"} from the next evaluation on.` : "Nothing new to keep.";
+      };
+    } catch (err) { $("#learnMsg").innerHTML = `<span class="error">${esc(err.message)}</span>`; }
+    aiBusy(false);
+    $("#learnBtn").disabled = false;
   };
   $("#saveDraft").onclick = () => save().catch((err) => $("#saveMsg").textContent = err.message);
   $("#exportDraft").onclick = async () => {
@@ -1648,6 +1846,53 @@ function scanNote(d) {
 }
 
 // --- Settings ----------------------------------------------------------------------
+
+// The fact corrections MindChart follows when reading each type of document, and the writing preferences it follows
+// when writing evaluations, which can be edited, deleted or added to here.
+async function learnedCard(data) {
+  const card = $("#learnedCard");
+  if (!card) return;
+  try { data = data || await api("GET", "learned"); } catch (err) { card.querySelector(".muted").textContent = err.message; return; }
+  card.innerHTML = `<h2>What MindChart has learned from you</h2>
+    <h3>Corrected facts</h3>
+    <p class="muted small">When you correct or delete a fact the AI found, MindChart shows the AI your ${data.examples_each} most recent
+      corrections for that type of document the next time it reads one. Quotes from other patients' records are never added as facts:
+      the AI's facts must be found in the document it's reading.</p>
+    ${data.corrections.length ? `<div class="learned-list">${data.corrections.map((c) => `<div class="learned-row"><span class="grow">${esc(c.type)}
+      <span class="muted small">${c.count} correction${c.count === 1 ? "" : "s"}</span></span>
+      <button class="link small" data-forget="${esc(c.type)}">Forget</button></div>`).join("")}</div>`
+      : '<p class="empty small">None yet. Correct a fact on any document page and it will appear here.</p>'}
+    <h3>How you like evaluations written</h3>
+    <p class="muted small">Followed every time MindChart writes an evaluation. Add them here, or have MindChart suggest some from your edits
+      to an evaluation draft. Keep them general: no patient details.</p>
+    <div class="learned-list">${data.preferences.map((p) => `<div class="learned-row" data-pref="${p.id}">
+      <input type="text" value="${esc(p.text)}" maxlength="300" class="grow" aria-label="Writing preference">
+      <button class="link small" data-save-pref hidden>Save</button><button class="link small" data-delete-pref>Delete</button></div>`).join("")}</div>
+    <form class="row" id="addPref" onsubmit="return false" style="margin-top:8px">
+      <input name="text" maxlength="300" placeholder="Refer to the patient as “the youth”" style="flex:1" aria-label="New writing preference">
+      <button type="submit" class="secondary small">Add</button></form>
+    <p class="error"></p>`;
+  const fail = (err) => { card.querySelector(".error").textContent = err.message; };
+  card.querySelectorAll("[data-forget]").forEach((b) => b.onclick = async () => {
+    if (!confirm(`Stop showing the AI your corrections for ${b.dataset.forget}? The facts you corrected stay as you left them.`)) return;
+    try { learnedCard(await api("POST", "learned/forget", { type: b.dataset.forget })); } catch (err) { fail(err); }
+  });
+  card.querySelectorAll("[data-pref]").forEach((row) => {
+    const input = row.querySelector("input"), saveBtn = row.querySelector("[data-save-pref]"), original = input.value;
+    input.oninput = () => { saveBtn.hidden = input.value.trim() === original; };
+    saveBtn.onclick = async () => {
+      try { learnedCard(await api("POST", `learned/preferences/${row.dataset.pref}`, { text: input.value })); toast("Saved ✓"); } catch (err) { fail(err); }
+    };
+    row.querySelector("[data-delete-pref]").onclick = async () => {
+      try { learnedCard(await api("POST", `learned/preferences/${row.dataset.pref}/delete`)); } catch (err) { fail(err); }
+    };
+  });
+  $("#addPref").onsubmit = async () => {
+    const text = $("#addPref [name=text]").value.trim();
+    if (!text) return;
+    try { await api("POST", "learned/preferences", { texts: [text] }); learnedCard(); } catch (err) { fail(err); }
+  };
+}
 
 async function settingsView() {
   const [s, touchId] = await Promise.all([api("GET", "settings"), api("GET", "settings/touch-id")]);
@@ -1683,6 +1928,7 @@ async function settingsView() {
     </div>
     <div class="actions" style="margin-top:14px"><button class="secondary small" id="exportAudit">Export activity log (CSV)</button>
       <button class="link small" id="securityHelp">How your records are protected</button></div></div>
+    <div class="card" id="learnedCard"><h2>What MindChart has learned from you</h2><div class="muted small">Loading…</div></div>
     <div class="card"><h2>Getting to know MindChart</h2>
       <p class="muted small">The tour shows each part of MindChart in about two minutes. Press ? on any page for help with that page.</p>
       <div class="actions"><button class="secondary small" id="startTour">Take the tour</button>
@@ -1697,6 +1943,7 @@ async function settingsView() {
   };
   touchIdCard(touchId);
   updateBox(s.version);
+  learnedCard();
   $("#passwordForm").onsubmit = async () => {
     const v = formValues($("#passwordForm"));
     if (v.new !== v.again) { $("#passwordForm .error").textContent = "The new passwords don't match."; return; }
@@ -1838,7 +2085,7 @@ async function refreshWork() {
   const badge = document.getElementById("uploadsBadge");
   if (badge) { badge.textContent = work.uploads || ""; badge.hidden = !work.uploads; }
   const lines = [];
-  if (work.current) lines.push(`${work.current.kind === "identify" ? "Identifying" : "Reading"} <b>${esc(work.current.name)}</b>` +
+  if (work.current) lines.push(`${{ identify: "Identifying", tag: "Dating the facts in" }[work.current.kind] || "Reading"} <b>${esc(work.current.name)}</b>` +
     (work.current.kind === "read" ? `<br>${esc(work.current.progress)}` : ""));
   const more = work.to_read - (work.current?.kind === "read" ? 1 : 0);
   if (more > 0) lines.push(`${more} more document${more === 1 ? "" : "s"} to read`);
@@ -1949,10 +2196,12 @@ function uploadCard(u) {
   const unclear = u.unclear_pages.filter((p) => p !== null);
   const reading = [u.pages ? `${u.pages} page${u.pages === 1 ? "" : "s"}` : "Word or text file",
     u.scanned_pages.length ? "read with OCR" : "",
-    unclear.length ? `<b class="warn">hard to read on page ${unclear.join(", ")}</b>` : ""].filter(Boolean).join(" · ");
+    unclear.length ? `<b class="warn">hard to read on page ${unclear.join(", ")}</b>` : "",
+    (u.checked_pages || []).length ? `checked by you: page ${u.checked_pages.join(", ")}` : ""].filter(Boolean).join(" · ");
   return `<form class="card upload-card" data-upload="${esc(u.id)}" onsubmit="return false">
     <div class="upload-head"><span class="object-icon obj-documents"><span class="i-documents"></span></span>
       <div class="grow"><b>${esc(u.name)}</b><div class="muted small">${reading}</div></div>
+      ${u.pages && combinable(u.name) ? `<button type="button" class="${unclear.length ? "" : "secondary "}small" data-check-pages>${unclear.length ? "Check hard-to-read pages" : "Check pages"}</button>` : ""}
       ${combinable(u.name) ? '<label class="combine-pick small muted"><input type="checkbox" data-combine> Part of one document</label>' : ""}
       <span class="identifying" ${s.ai_done ? "hidden" : ""}><span class="spinner"></span>The AI is reading it…</span></div>
     ${s.warning ? `<div class="conflict">⚠ ${esc(s.warning)}</div>` : ""}
@@ -2033,6 +2282,7 @@ function bindUploadCard(card, u) {
   patient.onchange = showPatient;
   card.addEventListener("change", () => { card.dataset.touched = "1"; renderUploadCards(); });
   card.addEventListener("input", () => { card.dataset.touched = "1"; });
+  card.querySelector("[data-check-pages]")?.addEventListener("click", () => reviewPages("uploads", u.id, () => syncUploadCards(true)));
   card.querySelector("[data-discard]").onclick = async () => {
     if (!confirm(`Discard ${u.name}? It won't be added to MindChart.`)) return;
     await api("POST", `uploads/${u.id}/discard`);

@@ -27,6 +27,7 @@ const HELP = {
     ["Type", "MindChart suggests what kind of document it is, and says how sure it is: Sure, Likely or Unsure. Change it if it's wrong, or add a new type with + New type…"],
     ["Patient", "Matched by name, date of birth and MRN. If the document names someone other than the patient whose page you dropped it on, you'll see a warning. For a child who isn't in MindChart yet, choose + New patient."],
     ["What to take from it", "Facts for history drafts, and which details to fill in. MindChart remembers your choice for that type."],
+    ["Check pages", "Shows each page's picture beside the text MindChart read, so you can correct misread handwriting. MindChart uses your text from then on."],
     ["Confirm", "Files it into the patient's records and reads it in the background. Confirm all that are ready files the ones MindChart is sure of."],
     ["It learns", "Each confirmation, and each later correction, teaches MindChart to recognize that kind of document."],
   ] },
@@ -73,6 +74,7 @@ const HELP = {
     ["Rating scales and vitals", "Add PHQ-A, GAD-7, SCARED, Vanderbilt or CRAFFT totals, or weight and BMI, and see them charted over time with the published score bands."],
     ["Timeline", "Their history in date order, from the documents' dated facts, medications, scores and follow-ups."],
     ["Add note", "Write a quick note. Notes are used in future drafts too."],
+    ["Current picture", "The newest information on each topic (school, home and legal, treatment, how they're doing), with what older records said under it. Check it before writing an evaluation."],
     ["Write evaluation", "Drafts a psychiatric evaluation from the records you tick plus your evaluation notes (uploaded, typed or dictated). The history comes from the records; the interview, mental status, risk, impression, diagnoses and plan come only from your notes. Every sentence cites its source. It's an AI draft: check each sentence before using it. Detailed history gives everything the records say instead."],
     ["Documents", "Each one shows whether it's been read yet. Reading happens in the background; the bottom left of the sidebar shows progress."],
     ["Edit and Delete", "Edit changes their details, and every change is logged. Delete removes them and all their records for good."],
@@ -107,14 +109,17 @@ const HELP = {
     ["✦ AI details", "Filled in by the AI, each with the quote it came from. Check them against the quote; anything you edit is never overwritten."],
     ["Change its type", "Edit and pick another type. MindChart fills in the new type's details and learns from the correction."],
     ["Facts found", "Each fact keeps the exact words it came from. “Not verified” means the quote couldn't be found, so it's left out of drafts."],
+    ["Check pages", "Compare each page's picture with the text MindChart read and correct it. The document is then read again from your text; facts you edited are kept."],
   ] },
   "list:facts": { title: "Facts", intro: "Every fact found in every document, with its source.", items: [
     ["Quotes", "Each fact keeps the exact words it came from and the page they're on."],
-    ["Correct a fact", "Open it and click Edit. Future drafts use your correction."],
+    ["As of and earlier", "Each fact shows when it was true. The newest on a topic (grade, placement, a dose) is current; older ones say earlier, and evaluations treat them as past."],
+    ["Correct a fact", "Open it and click Edit. Future drafts use your correction, and the next document of that type is read with it as an example."],
     ["Not verified", "The AI's quote couldn't be found in the document, so the fact is kept out of drafts."],
   ] },
   "record:facts": { title: "A fact", intro: "One fact and where it came from.", items: [
-    ["Edit", "Correct the wording, section or date. Future drafts use your version."],
+    ["Edit", "Correct the wording, section, date, kind or topic. Future drafts use your version, and MindChart learns from it when reading that type of document."],
+    ["Kind and topic", "An event happened once; an ongoing fact was true as of its record's date and can change; background doesn't change. The topic groups ongoing facts, so the newest counts as current."],
     ["Source", "The quote and page show exactly where it came from."],
   ] },
   "list:drafts": { title: "Drafts", intro: "History drafts you've built.", items: [
@@ -126,6 +131,7 @@ const HELP = {
     ["Disagreements", "Red boxes show where documents disagree. Check those against the originals."],
     ["Scans", "Text read from scans or photos is noted, so you can check it carefully."],
     ["Edit, save and export", "Edit any section, Save changes, then Export to Word. Exported Word files aren't encrypted."],
+    ["Teach your style", "After editing an evaluation, Suggest from my edits proposes general writing habits (never patient details) for you to keep or drop."],
   ] },
   "list:activity": { title: "Activity", intro: "A record of who did what, and when.", items: [
     ["Tamper-evident", "Entries can't be changed or deleted. Settings checks the whole log."],
@@ -137,6 +143,7 @@ const HELP = {
     ["Change password", "Your records are re-protected with the new one. A lost password can't be recovered."],
     ["Touch ID", "Open MindChart with your fingerprint instead of typing your password. It's off until you turn it on, and your password still works."],
     ["Security", "Shows that your records are encrypted, whether this Mac's FileVault is on, and that the activity log is intact."],
+    ["What MindChart has learned", "The fact corrections it follows when reading each type of document, and your writing preferences, which you can edit, delete or add to."],
     ["Tour and checklist", "Take the tour again, or bring back the getting-started checklist."],
   ] },
 };

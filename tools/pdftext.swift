@@ -4,6 +4,7 @@
 // Everything runs on this computer; nothing is sent anywhere.
 // Usage: pdftext <file.pdf | image file>
 //        pdftext --combine <out.pdf> <files...>   joins photos and PDFs, in order, into one PDF
+//        pdftext --render <file> <page> <out.png>   one page as a picture, for checking its text against
 import AppKit
 import Foundation
 import ImageIO
@@ -82,6 +83,28 @@ if arguments.count >= 4 && arguments[1] == "--combine" {
         exit(1)
     }
     exit(0)
+}
+
+if arguments.count == 5 && arguments[1] == "--render", let number = Int(arguments[3]), number >= 1 {
+    let input = URL(fileURLWithPath: arguments[2])
+    var picture: CGImage?
+    if input.pathExtension.lowercased() == "pdf" {
+        if let document = PDFDocument(url: input), let page = document.page(at: number - 1) {
+            let bounds = page.bounds(for: .mediaBox)
+            let scale = 1800 / max(bounds.width, bounds.height)  // big enough to read handwriting on screen
+            picture = page.thumbnail(of: NSSize(width: bounds.width * scale, height: bounds.height * scale), for: .mediaBox)
+                .cgImage(forProposedRect: nil, context: nil, hints: nil)
+        }
+    } else if let source = CGImageSourceCreateWithURL(input as CFURL, nil), number <= CGImageSourceGetCount(source) {
+        picture = upright(source, number - 1, longestSide: 1800)
+    }
+    guard let image = picture, let destination = CGImageDestinationCreateWithURL(URL(fileURLWithPath: arguments[4]) as CFURL,
+                                                                                    "public.png" as CFString, 1, nil) else {
+        FileHandle.standardError.write("Could not show that page\n".data(using: .utf8)!)
+        exit(1)
+    }
+    CGImageDestinationAddImage(destination, image, nil)
+    exit(CGImageDestinationFinalize(destination) ? 0 : 1)
 }
 
 let path = arguments.count == 2 ? arguments[1] : ""

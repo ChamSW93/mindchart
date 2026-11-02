@@ -35,9 +35,13 @@ MindChart starts with a short tour of each part of the app. Take it (or skip it,
    - Try dropping a file onto a *different* patient's page. The card should warn you.
    - Try **+ New type…** for a kind of document MindChart doesn't know.
    - Try a photo of a printed page (fictional records only), or a sideways scan.
+   - Try a photo of some made-up handwritten notes, then **Check pages** on its card: the photo shows beside the text MindChart read. Correct anything it misread and save.
 4. Watch the bottom left of the sidebar: confirmed documents are read in the background. You can keep working meanwhile.
 5. On Jordan's page, click **Write evaluation**. Type a few lines of made-up evaluation notes (what Jordan said, a mental status, an impression, diagnoses and a plan), and write the draft. Review it: check that it reads like an evaluation, that every sentence's citation is right, that the impression, diagnoses and plan are only what you wrote, and try **Export to Word**. The AI can make mistakes: tell us about anything it got wrong or made up.
-6. Open the court order, IEP and psychological evaluation from the patient's page. Check the details the AI filled in (marked **✦ AI**, with the quote it came from) and correct one with **Edit**. Changing a document's type teaches MindChart too.
+   - While it's writing, you can open other pages and come back: it carries on and opens when it's done.
+   - Rewrite a section or two the way you'd write them, click **Save changes**, then **Suggest from my edits**. Keep the suggestions that are right. They show in **Settings → What MindChart has learned**, and the next evaluation should follow them.
+6. Open the court order, IEP and psychological evaluation from the patient's page. Check the details the AI filled in (marked **✦ AI**, with the quote it came from) and correct one with **Edit**. Changing a document's type teaches MindChart too, and so does correcting a fact the AI found (open it from **Facts found**): the next document of that type is read with your corrections as examples.
+   - On Jordan's page, look at **Current picture**: the newest information on each topic, with what older records said under it (for example, his guanfacine dose before and after the 2024 change). Each fact shows when it was true, such as "as of 08/2024" or "earlier".
 7. On Jordan's page, try the newer parts:
    - **Suggest from records** under Medications, then add the ones that are right and set their consent.
    - **+ Add a score or vitals**: a few PHQ-A scores on different dates, to see the chart.

@@ -43,6 +43,7 @@ import time
 from pathlib import Path
 
 import fields as fieldtypes
+import picture
 import zipcodes
 
 # Where the data lives. This stays the same if the app is renamed, so saved records are always found.
@@ -52,7 +53,7 @@ MOUNT = HOME / ".unlocked"
 DATABASE = MOUNT / "records.db"
 AUTO_LOCK_MINUTES = 15
 MIN_PASSWORD_LENGTH = 10
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 BACKUPS_KEPT = 5
 MAX_ATTEMPTS = 5  # wrong passwords allowed before MindChart makes you wait
 
@@ -91,7 +92,17 @@ INCIDENT_PEOPLE_TABLE = """CREATE TABLE IF NOT EXISTS incident_people (
 COTTAGE_ANALYSES_TABLE = """CREATE TABLE IF NOT EXISTS cottage_analyses (
     id INTEGER PRIMARY KEY, cottage_id INTEGER REFERENCES cottages(id) ON DELETE CASCADE, created TEXT, model TEXT, result TEXT,
     feedback TEXT);"""
+# A fact the AI found that the clinician then corrected ("corrected": what it became) or removed (no "corrected"), kept
+# as an example for reading that type of document next time. They go when their document is deleted, like the rest of
+# a patient's records. fact_id is cleared when the fact itself is deleted, so a later fact can't take over the example.
+FACT_CORRECTIONS_TABLE = """CREATE TABLE IF NOT EXISTS fact_corrections (
+    id INTEGER PRIMARY KEY, fact_id INTEGER UNIQUE, document_id INTEGER REFERENCES documents(id) ON DELETE CASCADE,
+    quote TEXT, found TEXT, corrected TEXT, added TEXT);"""
+# How the clinician likes evaluations written, in general terms with no patient details, followed whenever the AI writes
+# one. The AI proposes them from the clinician's edits to drafts, and they're kept only once approved (or typed in Settings).
+WRITING_PREFERENCES_TABLE = """CREATE TABLE IF NOT EXISTS writing_preferences (id INTEGER PRIMARY KEY, text TEXT, added TEXT);"""
 EXAMPLE_CHARS = 3000  # how much of a document's opening text is kept as an example
+GUIDANCE_EXAMPLES = 8  # how many recent corrections guide the reading of each type of document
 
 _last_activity = time.time()
 _lock = threading.Lock()
@@ -149,6 +160,10 @@ OBJECTS = {
         "fields": [
             {"name": "section", "label": "Section", "type": "picklist", "options": SECTIONS},
             {"name": "fact", "label": "Fact", "type": "longtext", "required": True},
+            # When it was true (picture.py): an Event happened once, an Ongoing fact was true as of its record's date and
+            # can change (the newest on each topic is current), and Background doesn't change.
+            {"name": "kind", "label": "Kind", "type": "picklist", "options": picture.KINDS},
+            {"name": "topic", "label": "Topic", "type": "text"},
             {"name": "date", "label": "Date", "type": "date"},
             {"name": "quote", "label": "Quote from source", "type": "longtext", "edit": False},
             {"name": "page", "label": "Page", "type": "number", "edit": False},
@@ -315,7 +330,7 @@ CREATE VIEW documents_view AS
     FROM documents d JOIN patients p ON p.id = d.patient_id;
 CREATE VIEW facts_view AS
     SELECT f.uid AS id, p.uid AS patient_id, p.name AS patient, d.uid AS document_id, d.name AS document,
-           d.document_type, d.document_date, f.section, f.fact, f.date, f.quote, f.page, f.verified, f.edited
+           d.document_type, d.document_date, f.section, f.fact, f.kind, f.topic, f.date, f.quote, f.page, f.verified, f.edited
     FROM facts f JOIN documents d ON d.id = f.document_id JOIN patients p ON p.id = d.patient_id;
 CREATE VIEW drafts_view AS
     SELECT r.uid AS id, p.uid AS patient_id, p.name AS patient, COALESCE(json_extract(r.result, '$.kind'), 'history') AS kind,
@@ -437,7 +452,8 @@ def prepare_database(db):
                 raise
         db.isolation_level = ""
     db.executescript("\n".join(table_sql(name) for name in OBJECTS) + SETTINGS_TABLE + FIELD_DEFS_TABLE
-                     + RECORD_TYPES_TABLE + UPLOADS_TABLE + EXAMPLES_TABLE + GUARDIANSHIPS_TABLE + INCIDENT_PEOPLE_TABLE + COTTAGE_ANALYSES_TABLE + VIEWS)
+                     + RECORD_TYPES_TABLE + UPLOADS_TABLE + EXAMPLES_TABLE + GUARDIANSHIPS_TABLE + INCIDENT_PEOPLE_TABLE + COTTAGE_ANALYSES_TABLE
+                     + FACT_CORRECTIONS_TABLE + WRITING_PREFERENCES_TABLE + VIEWS)
     seed_field_defs(db)
     seed_record_types(db)
     seed_cottages(db)
@@ -852,11 +868,29 @@ def list_records(name, search="", patient_uid=None, limit=1000, record_type=None
         rows.sort(key=lambda r: (r["status"] == "Done", later(r["due"])))
     elif name == "incidents":  # newest first
         rows.sort(key=lambda r: tuple(-x for x in later(r["date"])))
+    elif name == "facts":  # when each was true, and which are current
+        rows = picture.in_order(with_picture(rows))
+        columns = columns[:columns.index("fact") + 1] + ["status", "as_of"] + columns[columns.index("fact") + 1:]
     elif view == "guardians_view":  # each guardian's town and rough drive time, from their ZIP code
         for r in rows:
             found = zipcodes.place(json.loads(r["details"] or "{}").get("zip"))
             r.update(town=f"{found['town']}, {found['state']}" if found else None, drive_minutes=found and found["minutes"])
     return {"columns": columns, "rows": rows}
+
+
+def with_picture(rows):
+    """Facts (rows of facts_view) with when each was true and whether it's current (picture.annotate), worked out against
+    all of their patients' facts, not just these: a newer record elsewhere can make one of these earlier."""
+    patients = sorted({r["patient_id"] for r in rows})
+    if not patients:
+        return rows
+    with connect() as db:
+        everything = [dict(r) for r in db.execute(
+            f"SELECT id, patient_id, kind, topic, date, document_date, verified FROM facts_view WHERE patient_id IN ({','.join('?' * len(patients))})",
+            patients)]
+    found = {f["id"]: f for f in picture.annotate(everything)}
+    keys = ("as_of", "status", "newer", "topic_key", "group")
+    return [{**r, **{k: found[r["id"]].get(k, "") for k in keys}} if r["id"] in found else r for r in rows]
 
 
 def get_record(name, uid):
@@ -899,10 +933,15 @@ def get_record(name, uid):
         log("opened cottage", None, f"{uid}: {row['name']}")
     elif name == "documents":
         with connect() as db:
-            doc = db.execute("SELECT id, pages FROM documents WHERE uid = ?", (uid,)).fetchone()
-            record["text"] = "\n\n".join(p["text"] for p in json.loads(doc["pages"] or "[]"))[:20000]
+            doc = db.execute("SELECT id, pages, original IS NOT NULL AS has_original FROM documents WHERE uid = ?", (uid,)).fetchone()
+            pages = json.loads(doc["pages"] or "[]")
+            record["text"] = "\n\n".join(p["text"] for p in pages)[:20000]
+            record["pages"] = {**page_summary(pages), "has_original": bool(doc["has_original"])}
             record["related"]["facts"] = [dict(r) for r in db.execute(
                 "SELECT * FROM facts_view WHERE document_id = ? ORDER BY section", (uid,))]
+        record["related"]["facts"] = picture.in_order(with_picture(record["related"]["facts"]))
+    elif name == "facts":
+        record["record"] = with_picture([record["record"]])[0]
     elif name == "drafts":
         with connect() as db:
             record["result"] = json.loads(db.execute("SELECT result FROM drafts WHERE uid = ?", (uid,)).fetchone()["result"])
@@ -1125,6 +1164,8 @@ def update_record(name, uid, fields):
         if not values and not link_changes:
             return
         if name == "facts":
+            if {"section", "fact", "kind", "topic", "date"} & set(values):
+                remember_correction(db, row_id, current, {**current, **values})
             values["edited"] = now()
         if values:
             db.execute(f"UPDATE {name} SET {', '.join(f'{k} = ?' for k in values)} WHERE id = ?", (*values.values(), row_id))
@@ -1160,6 +1201,9 @@ def delete_record(name, uid):
         label = OBJECTS[name]["label"].lower()
         if name == "patients":
             label = person_label(db.execute("SELECT record_type FROM patients WHERE id = ?", (row_id,)).fetchone()[0])
+        if name == "facts":
+            remember_correction(db, row_id, dict(db.execute("SELECT * FROM facts WHERE id = ?", (row_id,)).fetchone()), None)
+            db.execute("UPDATE fact_corrections SET fact_id = NULL WHERE fact_id = ?", (row_id,))
         db.execute(f"DELETE FROM {name} WHERE id = ?", (row_id,))
         if name == "cottages":
             sync_cottage_options(db)  # its residents keep the name, shown as no longer on the list
@@ -1352,7 +1396,8 @@ def add_note(patient_uid, text, date="", author="", title="", document_type="Cli
         _, uid = insert(db, "documents", {
             "patient_id": patient_id, "name": title.strip() or f"{'Evaluation notes' if document_type == fieldtypes.EVALUATION_NOTES else 'Note'} {date}",
             "kind": "Note", "document_type": document_type, "document_date": date, "author": author.strip(), "added": now(),
-            "pages": json.dumps([{"page": None, "text": text.strip(), "scanned": False}])})
+            "pages": json.dumps([{"page": None, "text": text.strip(), "scanned": False}]),
+            "read_state": "queued"})  # read in the background like a file, so its facts are ready (and in the current picture)
     log("added note", patient_id, uid)
     return uid
 
@@ -1374,7 +1419,8 @@ def add_upload(name, original, pages, patient_uid, suggestion):
 def page_summary(pages):
     return {"pages": len(pages) if pages and pages[0]["page"] else None,
             "scanned_pages": [p["page"] for p in pages if p.get("scanned")],
-            "unclear_pages": [p["page"] for p in pages if p.get("unclear")]}
+            "unclear_pages": [p["page"] for p in pages if p.get("unclear")],
+            "checked_pages": [p["page"] for p in pages if p.get("checked")]}  # read by a person against the original
 
 
 def list_uploads():
@@ -1492,6 +1538,48 @@ def learn_type(db, document_id, document_type):
                (document_id, document_type, row["name"], text, now()))
 
 
+# --- Checking a hard-to-read page against the original ------------------------------
+
+def page_source(kind, uid):
+    """An upload's or a filed document's (kind) file name, original file and pages, to show a page beside its text."""
+    if kind not in ("uploads", "documents"):
+        raise KeyError("Unknown request")
+    with connect() as db:
+        row = db.execute(f"SELECT name, original, pages FROM {kind} WHERE uid = ?", (uid,)).fetchone()
+    if not row:
+        raise ValueError("That upload has already been dealt with" if kind == "uploads" else "That document no longer exists")
+    return row["name"], row["original"], json.loads(row["pages"] or "[]")
+
+
+def correct_page(kind, uid, number, text):
+    """The clinician's own reading of a page, used in place of the OCR's from now on ("checked"). An upload is identified
+    again; a filed document is read again, so its facts come from the corrected text (facts edited by hand stay)."""
+    text = text.strip()
+    if not text:
+        raise ValueError("Type the page's text first")
+    _, _, pages = page_source(kind, uid)
+    page = next((p for p in pages if p["page"] == number), None)
+    if not page:
+        raise ValueError(f"There's no page {number}")
+    changed = page["text"].strip() != text
+    page.update(text=text, unclear=False, checked=True)
+    with connect() as db:
+        if kind == "uploads":
+            db.execute(f"UPDATE uploads SET pages = ?{', state = ?' if changed else ''} WHERE uid = ?",
+                       (json.dumps(pages), *(["waiting"] if changed else []), uid))
+            patient_id = None
+        else:
+            row = db.execute("SELECT id, patient_id, read_state FROM documents WHERE uid = ?", (uid,)).fetchone()
+            reread = changed and row["read_state"] is not None  # (None: nothing was to be taken from it)
+            db.execute(f"UPDATE documents SET pages = ?{', read_state = ?' if reread else ''} WHERE id = ?",
+                       (json.dumps(pages), *(["queued"] if reread else []), row["id"]))
+            db.execute("UPDATE type_examples SET text = ? WHERE document_id = ?",
+                       ("\n".join(p["text"] for p in pages)[:EXAMPLE_CHARS], row["id"]))
+            patient_id = row["patient_id"]
+    log("corrected a page's text" if changed else "checked a page's text", patient_id, f"{uid}: page {number}")
+    return {"reading_again": kind == "documents" and changed}
+
+
 def type_examples():
     with connect() as db:
         return [dict(r) for r in db.execute("SELECT document_type, name, text FROM type_examples ORDER BY id")]
@@ -1511,8 +1599,35 @@ def next_document_to_read():
         return None
     return {"id": row["id"], "uid": row["uid"], "name": row["name"], "pages": json.loads(row["pages"]),
             "fields_only": row["read_state"] == "fields", "pull": json.loads(row["pull"] or "null"),
+            "guidance": reading_guidance(row["document_type"] or "Other"),
             "info": {"document_type": row["document_type"] or "Other", "document_date": row["document_date"] or "",
                      "author": row["author"] or ""}}
+
+
+TAG_BATCH = 40  # facts tagged in one request
+
+
+def next_facts_to_tag():
+    """Facts read before they were tagged with a kind and topic (version 9), a document's worth at a time, for the AI
+    to tag in the background: {"name", "document_type", "document_date", "facts": [{"id", "section", "fact", "date"}]}."""
+    with connect() as db:
+        row = db.execute("SELECT d.id, d.name, d.document_type, d.document_date FROM facts f JOIN documents d ON d.id = f.document_id "
+                         "WHERE f.kind IS NULL AND d.read_state = 'read' ORDER BY d.id LIMIT 1").fetchone()
+        if not row:
+            return None
+        facts = [dict(r) for r in db.execute("SELECT id, section, fact, date FROM facts WHERE document_id = ? AND kind IS NULL "
+                                             "ORDER BY id LIMIT ?", (row["id"], TAG_BATCH))]
+    return {"name": row["name"], "document_type": row["document_type"] or "Other", "document_date": row["document_date"] or "",
+            "facts": facts}
+
+
+def save_fact_tags(tags):
+    """tags: {fact id: (kind, topic)}. A fact the AI left out is marked as tagged anyway (kind ""), so it isn't asked
+    about again; it just isn't dated."""
+    with connect() as db:
+        for fact_id, (kind, topic) in tags.items():
+            db.execute("UPDATE facts SET kind = ?, topic = ? WHERE id = ? AND kind IS NULL",
+                       (kind if kind in picture.KINDS else "", (topic or "") if kind == "Ongoing" else "", fact_id))
 
 
 def mark_unreadable(doc_id):
@@ -1674,29 +1789,32 @@ def documents_for_history(patient_uid, doc_uids, reread):
             if r["document_type"]:
                 doc["info"] = {"document_type": r["document_type"], "document_date": r["document_date"] or "",
                                "author": r["author"] or ""}
+                doc["guidance"] = reading_guidance(r["document_type"])
             if r["pull"]:
                 doc["pull"] = json.loads(r["pull"])
             if r["read_by_model"] and not reread:
                 doc["facts"] = [
                     {"section": f["section"], "fact": f["fact"], "date": f["date"] or "", "quote": f["quote"] or "",
-                     "page": f["page"], "verified": bool(f["verified"])}
+                     "page": f["page"], "verified": bool(f["verified"]), "kind": f["kind"] or "", "topic": f["topic"] or ""}
                     for f in db.execute("SELECT * FROM facts WHERE document_id = ? ORDER BY id", (r["id"],))
                 ]
             documents.append(doc)
     return documents
 
 
-def save_document_facts(doc_id, info, facts, model, filled=None):
-    """Save what a model found in a document, replacing anything found on an earlier read.
+def save_document_facts(doc_id, info, facts, model, filled=None, texts=None):
+    """Save what a model found in a document, replacing what was found on an earlier read (but not facts edited by hand).
 
     facts: None leaves the facts as they are (when only the record type's fields were filled in).
     filled: the record type's fields the AI filled in, {name: {"value", "quote", "page"}}. They never overwrite
     a value a person entered or edited; only empty fields, or ones the AI filled before, are updated.
+    texts: the page texts that were read. If a page was corrected meanwhile, the document stays queued to be read again.
     """
     with connect() as db:
-        row = db.execute("SELECT custom FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        row = db.execute("SELECT custom, pages FROM documents WHERE id = ?", (doc_id,)).fetchone()
         if not row:
             return  # deleted while it was being read
+        changed = texts is not None and [p["text"] for p in json.loads(row["pages"] or "[]")] != list(texts)
         stored = json.loads(row[0] or "{}")
         sources = stored.setdefault("_ai", {})
         for key, item in (filled or {}).items():
@@ -1704,15 +1822,126 @@ def save_document_facts(doc_id, info, facts, model, filled=None):
                 stored[key] = item["value"]
                 sources[key] = {"quote": item["quote"], "page": item.get("page")}
         db.execute("UPDATE documents SET document_type = ?, document_date = ?, author = ?, read_by_model = ?, read_at = ?, "
-                   "custom = ?, read_state = 'read' WHERE id = ?", (info.get("document_type"), info.get("document_date"),
-                                                                     info.get("author"), model, now(), json.dumps(stored), doc_id))
+                   "custom = ?, read_state = ? WHERE id = ?", (info.get("document_type"), info.get("document_date"), info.get("author"),
+                                                               model, now(), json.dumps(stored), "queued" if changed else "read", doc_id))
         if facts is None:
             return
-        db.execute("DELETE FROM facts WHERE document_id = ?", (doc_id,))
+        # Facts someone edited by hand are kept, and the new reading's versions of them (the same quote) left out.
+        kept = {(r[0], " ".join((r[1] or "").lower().split())) for r in
+                db.execute("SELECT section, quote FROM facts WHERE document_id = ? AND edited IS NOT NULL", (doc_id,))}
+        db.execute("DELETE FROM facts WHERE document_id = ? AND edited IS NULL", (doc_id,))
         for f in facts:
+            if (f.get("section"), " ".join((f.get("quote") or "").lower().split())) in kept:
+                continue
             insert(db, "facts", {"document_id": doc_id, "section": f.get("section"), "fact": f.get("fact"),
+                                 "kind": f.get("kind") or "", "topic": f.get("topic") or "",
                                  "date": f.get("date"), "quote": f.get("quote"), "page": f.get("page"),
                                  "verified": int(bool(f.get("verified")))})
+
+
+# --- What MindChart learns from the clinician's corrections -------------------------
+
+def remember_correction(db, fact_id, before, after):
+    """Keep a fact the AI found, and what the clinician made of it (after, or None if they removed it), as an example
+    for reading that type of document. The AI's own version is kept from the first correction; a fact changed back to
+    it is no longer an example."""
+    row = db.execute("SELECT quote, document_id FROM facts WHERE id = ?", (fact_id,)).fetchone()
+    if not row or not row["quote"]:
+        return  # added by hand, so there's nothing the AI did to learn from
+    shape = lambda f: {key: f.get(key) or "" for key in ("section", "fact", "kind", "topic", "date")}
+    old = db.execute("SELECT found FROM fact_corrections WHERE fact_id = ?", (fact_id,)).fetchone()
+    found = {**shape({}), **json.loads(old[0])} if old else shape(before)  # (ones kept before tags existed have none)
+    if after and shape(after) == found:
+        db.execute("DELETE FROM fact_corrections WHERE fact_id = ?", (fact_id,))
+        return
+    db.execute("INSERT INTO fact_corrections (fact_id, document_id, quote, found, corrected, added) VALUES (?, ?, ?, ?, ?, ?) "
+               "ON CONFLICT(fact_id) DO UPDATE SET corrected = excluded.corrected, added = excluded.added",
+               (fact_id, row["document_id"], row["quote"], json.dumps(found), json.dumps(shape(after)) if after else None, now()))
+
+
+def reading_guidance(document_type):
+    """The clinician's most recent corrections to facts read from documents of this type, for the AI to follow when
+    it reads the next one: [{"quote", "found", "corrected" (None if removed)}]."""
+    with connect() as db:
+        rows = db.execute("SELECT c.quote, c.found, c.corrected FROM fact_corrections c JOIN documents d ON d.id = c.document_id "
+                          "WHERE d.document_type = ? ORDER BY c.added DESC LIMIT ?", (document_type, GUIDANCE_EXAMPLES)).fetchall()
+    return [{"quote": r["quote"], "found": json.loads(r["found"]), "corrected": json.loads(r["corrected"] or "null")} for r in rows]
+
+
+def learned():
+    """What MindChart has learned, for Settings: how many fact corrections guide each type of document, and the
+    writing preferences."""
+    with connect() as db:
+        corrections = [{"type": r[0], "count": r[1]} for r in db.execute(
+            "SELECT d.document_type, COUNT(*) FROM fact_corrections c JOIN documents d ON d.id = c.document_id "
+            "GROUP BY d.document_type ORDER BY d.document_type")]
+        preferences = [dict(r) for r in db.execute("SELECT id, text, added FROM writing_preferences ORDER BY id")]
+    return {"corrections": corrections, "preferences": preferences, "examples_each": GUIDANCE_EXAMPLES}
+
+
+def forget_corrections(document_type):
+    """Stop using the clinician's fact corrections as examples for one type of document. The facts stay as corrected."""
+    with connect() as db:
+        count = db.execute("DELETE FROM fact_corrections WHERE document_id IN (SELECT id FROM documents WHERE document_type = ?)",
+                           (document_type,)).rowcount
+    log("cleared what MindChart learned from corrected facts", None, f"{document_type}: {count}")
+
+
+def writing_preferences():
+    with connect() as db:
+        return [r[0] for r in db.execute("SELECT text FROM writing_preferences ORDER BY id")]
+
+
+def add_writing_preferences(texts):
+    """Keep writing preferences the clinician approved or typed. Ones already kept (in any capitalization) are skipped."""
+    texts = [" ".join(str(t).split()) for t in texts or []]
+    with connect() as db:
+        have = {r[0].lower() for r in db.execute("SELECT text FROM writing_preferences")}
+        added = []
+        for text in texts:
+            if text and text.lower() not in have and len(text) <= 300:
+                db.execute("INSERT INTO writing_preferences (text, added) VALUES (?, ?)", (text, now()))
+                have.add(text.lower())
+                added.append(text)
+    if added:
+        log("added writing preferences", None, "; ".join(added))
+    return added
+
+
+def change_writing_preference(number, text):
+    """Edit one preference, or delete it when text is None."""
+    if text is not None:
+        text = " ".join(str(text).split())
+        if not text or len(text) > 300:
+            raise ValueError("Write the preference in a sentence (up to 300 characters)")
+    with connect() as db:
+        row = db.execute("SELECT text FROM writing_preferences WHERE id = ?", (number,)).fetchone()
+        if not row:
+            raise ValueError("That preference was already deleted")
+        if text is None:
+            db.execute("DELETE FROM writing_preferences WHERE id = ?", (number,))
+        else:
+            db.execute("UPDATE writing_preferences SET text = ? WHERE id = ?", (text, number))
+    log("deleted a writing preference" if text is None else "edited a writing preference", None,
+        row[0] if text is None else f"{row[0]} → {text}")
+
+
+def draft_people(uid):
+    """The names of a draft's patient, their legal guardians and their cottage, which mustn't find their way into
+    anything learned from it."""
+    patient_id = internal_patient("drafts", uid)
+    with connect() as db:
+        rows = db.execute("SELECT name, guardian, json_extract(custom, '$.cottage') FROM patients WHERE id = ? OR id IN "
+                          "(SELECT guardian_id FROM guardianships WHERE patient_id = ?)", (patient_id, patient_id)).fetchall()
+    return [name for row in rows for name in row if name]
+
+
+def draft_result(uid):
+    with connect() as db:
+        row = db.execute("SELECT result FROM drafts WHERE uid = ?", (uid,)).fetchone()
+    if not row:
+        raise ValueError("That draft no longer exists")
+    return json.loads(row[0])
 
 
 def save_draft(patient_uid, model, result, draft_uid=None):
@@ -1916,3 +2145,15 @@ def upgrade_to_v8(db):
 
 
 MIGRATIONS[8] = upgrade_to_v8
+
+
+def upgrade_to_v9(db):
+    """Version 9: each fact's kind (event, ongoing or background) and topic, so MindChart can tell which facts are current.
+    Facts saved before are tagged by the AI in the background (vault.next_facts_to_tag)."""
+    columns = {r[1] for r in db.execute("PRAGMA table_info(facts)")}
+    for column in ("kind", "topic"):
+        if columns and column not in columns:
+            db.execute(f"ALTER TABLE facts ADD COLUMN {column} TEXT")
+
+
+MIGRATIONS[9] = upgrade_to_v9

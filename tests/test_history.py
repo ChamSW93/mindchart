@@ -31,6 +31,14 @@ class QuoteChecking(unittest.TestCase):
     def test_too_short_quote_is_rejected(self):
         self.assertEqual(history.locate("Grade 7", self.pages), (False, None))
 
+    def test_two_word_quotes_from_terse_notes_need_the_fact_to_use_them(self):
+        notes = [page("Mood 'alright', affect constricted. Denies SI/HI.", 1)]
+        self.assertEqual(history.locate("affect constricted", notes, "Affect is constricted."), (True, 1))
+        self.assertEqual(history.locate("affect constricted", notes, "Denies suicidal ideation."), (False, None))  # not what it says
+        self.assertEqual(history.locate("affect blunted", notes, "Affect is blunted."), (False, None))  # not in the notes
+        self.assertEqual(history.locate("affect constricted", notes), (False, None))
+        self.assertEqual(history.locate("ffect constricted", notes, "ffect constricted"), (False, None))  # whole words only
+
 
 class Citations(unittest.TestCase):
     facts = [{"doc": 0, "page": 3}, {"doc": 1, "page": None}]

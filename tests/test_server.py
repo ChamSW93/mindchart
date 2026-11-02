@@ -157,6 +157,33 @@ class Server(unittest.TestCase):
         self.assertEqual(connection.getresponse().status, 413)
         connection.close()
 
+    def test_an_evaluation_is_written_as_a_job_the_page_follows(self):
+        support.unlocked_vault()
+        patient = self.request("POST", "/api/records/patients", {"name": "Job Test (fictional)"})[1]["id"]
+
+        def ask(model, thinking, system, user, schema, max_tokens, history=()):
+            if "facts" in schema["properties"]:
+                return {"facts": [{"section": "mse", "fact": "Calm and cooperative.", "kind": "Ongoing", "topic": "behavior: demeanor",
+                                   "date": "", "quote": "Calm and cooperative today"}] * 3}
+            return {"sentences": [{"text": "Calm and cooperative.", "facts": [1]}], "conflicts": []}
+        real, server.history.ask = server.history.ask, ask
+        try:
+            status, started = self.request("POST", f"/api/patients/{patient}/history",
+                                           {"doc_ids": [], "kind": "evaluation", "notes": "Calm and cooperative today, good eye contact.",
+                                            "model": "test-model"})
+            self.assertEqual(status, 200)  # it answers straight away, and the writing carries on without the page
+            for _ in range(100):
+                job = self.request("GET", f"/api/builds/{started['build_id']}")[1]
+                if job["done"]:
+                    break
+                server.time.sleep(0.1)
+        finally:
+            server.history.ask = real
+        self.assertIsNone(job["error"])
+        self.assertTrue(job["draft_id"].startswith("DRF-"))
+        self.assertEqual(self.request("GET", f"/api/builds?patient={patient}")[1], {"build": None})  # nothing left running
+        self.assertEqual(self.request("GET", "/api/builds/unknown")[0], 400)
+
     def test_pages_are_served(self):
         status, page = self.request("GET", "/")
         self.assertEqual(status, 200)

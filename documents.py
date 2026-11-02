@@ -124,6 +124,26 @@ def combine(files):
         return combined.read_bytes()
 
 
+def has_pages(name):
+    """Whether a file has pages that can be shown as pictures (PDFs, scans and photos, not Word or text files)."""
+    return Path(name).suffix.lower() in IMAGE_TYPES | {".pdf"}
+
+
+def render_page(name, data, page, folder=None):
+    """One page of a PDF or picture as a PNG, to check its text against. folder: where the temporary copies go (the
+    encrypted store, so a patient's page never sits unencrypted on disk)."""
+    suffix = Path(name).suffix.lower()
+    if not has_pages(name):
+        raise ValueError("Only PDFs, scans and photos have pages to show")
+    with tempfile.TemporaryDirectory(dir=folder) as temp:
+        source, picture = Path(temp) / f"source{suffix}", Path(temp) / "page.png"
+        source.write_bytes(data)
+        result = subprocess.run([str(pdftext()), "--render", str(source), str(int(page)), str(picture)], capture_output=True)
+        if result.returncode != 0 or not picture.exists():
+            raise ValueError(f"Couldn't show page {page}")
+        return picture.read_bytes()
+
+
 def pdftext():
     """The PDF and image reader in tools/, built from its Swift source the first time it's needed."""
     if not PDFTEXT.exists():

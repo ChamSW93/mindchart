@@ -10,10 +10,13 @@ Open: http://localhost:8000
 """
 import http.server
 import json
+import contextlib
 import logging
 import logging.handlers
 import mimetypes
 import os
+import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -88,6 +91,79 @@ def filevault_on():
     """Whether the Mac's own disk encryption is on. HIPAA expects devices holding patient data to be encrypted."""
     return "FileVault is On" in subprocess.run(["fdesetup", "status"], capture_output=True, text=True).stdout
 UPDATE = {"current": updater.current_version(), "available": False, "last_check": updater.last_check()}
+
+
+@contextlib.contextmanager
+def keep_awake():
+    """Keep the Mac from going to sleep while the AI does something the clinician is waiting for (an evaluation can take
+    a quarter of an hour on a smaller Mac). The screen can still turn off."""
+    try:
+        process = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
+    except OSError:
+        process = None
+    try:
+        yield
+    finally:
+        if process:
+            process.terminate()
+            process.wait()
+
+
+# Evaluations being written, by job ID. They run here rather than inside the page's request, so a dropped connection
+# ("Load failed": the Mac napping, or the window reloading) loses nothing: the page checks in on the job, and picks it
+# up again if it was closed. Finished jobs are forgotten after an hour.
+BUILDS = {}
+BUILDS_LOCK = threading.Lock()
+
+
+def start_build(patient_uid, docs, model, thinking, reread, evaluation, header):
+    job = {"id": secrets.token_hex(8), "patient_id": patient_uid, "kind": "evaluation" if evaluation else "history",
+           "progress": "Starting", "step": 0, "total": 1, "warnings": [], "draft_id": None, "error": None, "done": False,
+           "started": time.time()}
+    with BUILDS_LOCK:
+        for old in [b for b in BUILDS.values() if b["done"] and time.time() - b["started"] > 3600]:
+            del BUILDS[old["id"]]
+        BUILDS[job["id"]] = job
+    threading.Thread(target=run_build, args=(job, docs, model, thinking, reread, evaluation, header), daemon=True).start()
+    return job
+
+
+def run_build(job, docs, model, thinking, reread, evaluation, header):
+    try:
+        with keep_awake():
+            if worker.STATUS["current"]:
+                job["progress"] = "Waiting for background reading to finish its current step"
+            with worker.paused():
+                for update in write_draft(job["patient_id"], docs, model, thinking, reread, evaluation, header):
+                    if "warning" in update:
+                        job["warnings"].append(update["warning"])
+                    elif "result" in update:
+                        job["draft_id"] = update["draft_id"]
+                    else:
+                        job.update(progress=update.get("progress", ""), step=update.get("step", 0), total=update.get("total", 1))
+    except Exception as error:
+        log.exception("Writing a draft failed")  # (the log has no patient details)
+        job["error"] = str(error) or type(error).__name__
+    finally:
+        job["done"] = True
+
+
+def write_draft(patient_uid, docs, model, thinking, reread, evaluation=False, header=None):
+    """Read what needs reading and write the draft, saving facts as documents are read and the draft at the end.
+    Yields history.build's updates; the last one carries the saved draft's "draft_id"."""
+    if not reread:  # documents read in the background while this waited are picked up, not read twice
+        read_now = {d["uid"]: d for d in vault.documents_for_history(patient_uid, [d["uid"] for d in docs], False)}
+        docs = [read_now[d["uid"]] if "facts" in read_now.get(d["uid"], {}) and "facts" not in d else d for d in docs]
+    for update in history.build(docs, model, thinking, vault.document_field_definitions(), intake.document_types(), evaluation, header,
+                                vault.writing_preferences()):
+        vault.touch()  # a long build counts as activity, so MindChart stays unlocked
+        if "document_read" in update:
+            read = update["document_read"]
+            vault.save_document_facts(docs[read["index"]]["id"], read["info"], read["facts"], model, read.get("filled"))
+            continue
+        if "result" in update:
+            update["draft_id"] = vault.save_draft(patient_uid, model, update["result"])
+        yield update
 
 
 def check_for_updates_forever():
@@ -353,6 +429,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             suggestion, _ = intake.suggest(name, pages, target)
             original = documents.combine([(f["name"], f["original"]) for f in files])
             return {"id": vault.combine_uploads(uids, name, original, pages, target, suggestion)}
+        # A page's picture beside its text, to check what the OCR read (handwriting, poor copies) and correct it
+        if is_("GET", "uploads", "*", "pages") or is_("GET", "documents", "*", "pages"):
+            name, original, pages = vault.page_source(parts[0], args[0])
+            return {"name": name, "viewable": bool(original) and documents.has_pages(name),
+                    "pages": [{key: p.get(key) for key in ("page", "text", "unclear", "checked", "scanned")} for p in pages if p["page"]]}
+        if is_("GET", "uploads", "*", "page", "*") or is_("GET", "documents", "*", "page", "*"):
+            name, original, _ = vault.page_source(parts[0], args[0])
+            if not original:
+                raise ValueError("There's no original file to show")
+            self.send_body(200, documents.render_page(name, original, int(args[1]), folder=vault.MOUNT), "image/png")
+            return None
+        if is_("POST", "uploads", "*", "page", "*") or is_("POST", "documents", "*", "page", "*"):
+            return vault.correct_page(parts[0], args[0], int(args[1]), str(data.get("text") or ""))
         if is_("POST", "uploads", "*", "confirm"):
             document_id, patient_id = vault.confirm_upload(args[0], data)
             return {"document_id": document_id, "patient_id": patient_id}
@@ -377,13 +466,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return history.draft_visit_note(model, thinking, data.get("inputs", ""))
         if is_("POST", "cottages", "*", "analyze"):  # the AI's (experimental) reading of how a cottage's residents get along
             model, thinking = model_choice(data)
-            with worker.paused():  # the model is busy with this
+            with worker.paused(), keep_awake():  # the model is busy with this
                 result = history.analyze_cottage(model, thinking, vault.cottage_inputs(args[0]), vault.analysis_feedback())
             number = vault.save_cottage_analysis(args[0], result, model)
             return {**result, "id": number, "created": vault.now(), "model": model, "feedback": None}
         if is_("POST", "cottages", "analyze"):  # the same across all the cottages
             model, thinking = model_choice(data)
-            with worker.paused():
+            with worker.paused(), keep_awake():
                 result = history.analyze_cottages(model, thinking, vault.intercottage_inputs(), vault.analysis_feedback())
             number = vault.save_cottage_analysis(None, result, model)
             return {**result, "id": number, "created": vault.now(), "model": model, "feedback": None}
@@ -420,9 +509,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return {"items": vault.coming_up()}
         if is_("POST", "patients", "*", "history"):
             return self.build_history(args[0], data)
+        if is_("GET", "builds", "*"):  # how a draft being written is getting on
+            job = BUILDS.get(args[0])
+            if not job:
+                raise ValueError("That draft isn't being written any more. Check the patient's drafts.")
+            return {k: v for k, v in job.items() if k != "started"}
+        if is_("GET", "builds"):  # a patient's draft still being written, if any, to pick up again on their page
+            running = [j for j in BUILDS.values() if j["patient_id"] == query.get("patient") and not j["done"]]
+            return {"build": {k: v for k, v in running[-1].items() if k != "started"} if running else None}
         if is_("POST", "drafts", "*"):
             vault.save_draft_edits(args[0], data["result"])
             return {}
+        if is_("POST", "drafts", "*", "learn"):  # writing preferences the AI sees in the clinician's edits, for them to approve
+            model, thinking = model_choice(data)
+            result = vault.draft_result(args[0])
+            private = [w for name in vault.draft_people(args[0]) for w in re.findall(r"[A-Za-z][A-Za-z'-]+", name)]
+            with worker.paused(), keep_awake():
+                found = history.learn_preferences(model, thinking, result, vault.writing_preferences(), private)
+            return {"suggestions": found}
+        if is_("GET", "learned"):  # Settings: what MindChart has learned from the clinician
+            return vault.learned()
+        if is_("POST", "learned", "forget"):
+            vault.forget_corrections(str(data.get("type") or ""))
+            return vault.learned()
+        if is_("POST", "learned", "preferences"):
+            return {"added": vault.add_writing_preferences(data.get("texts") or [])}
+        if is_("POST", "learned", "preferences", "*"):
+            vault.change_writing_preference(int(args[0]), str(data.get("text") or ""))  # (empty is refused, not a delete)
+            return vault.learned()
+        if is_("POST", "learned", "preferences", "*", "delete"):
+            vault.change_writing_preference(int(args[0]), None)
+            return vault.learned()
         if is_("POST", "export"):
             docx = history.build_docx(data["sections"], data["documents"], data.get("kind") or "history", data.get("header"))
             if data.get("draft_id"):  # leaving the encrypted store is recorded, since the file isn't encrypted
@@ -443,8 +560,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         raise KeyError("Unknown request")
 
     def build_history(self, patient_uid, data):
-        """Draft a psychiatric evaluation (or the history alone) from a patient's documents, saving what's read and the
-        draft. Evaluation notes typed into the form are saved first, as a document of their own."""
+        """Start drafting a psychiatric evaluation (or the history alone) from a patient's documents, saving what's read
+        and the draft. Evaluation notes typed into the form are saved first, as a document of their own. Returns the job's
+        ID, for following its progress (GET builds/<id>)."""
         model, thinking = model_choice(data)
         evaluation = data.get("kind", "evaluation") == "evaluation"
         doc_ids = list(data.get("doc_ids") or [])
@@ -456,28 +574,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise ValueError("Choose at least one source")
         header = vault.evaluation_header(patient_uid) if evaluation else None
         vault.log("wrote an evaluation" if evaluation else "built a history", vault.internal("patients", patient_uid), model)
-        self.start_stream()
-        try:
-            if worker.STATUS["current"]:
-                self.stream_line({"progress": "Waiting for background reading to finish its current step", "step": 0, "total": 1})
-            with worker.paused():
-                self.stream_history(patient_uid, docs, model, thinking, data.get("reread"), evaluation, header)
-        except Exception as error:
-            self.stream_line({"error": str(error)})
-
-    def stream_history(self, patient_uid, docs, model, thinking, reread, evaluation=False, header=None):
-        if not reread:  # documents read in the background while this waited are picked up, not read twice
-            read_now = {d["uid"]: d for d in vault.documents_for_history(patient_uid, [d["uid"] for d in docs], False)}
-            docs = [read_now[d["uid"]] if "facts" in read_now.get(d["uid"], {}) and "facts" not in d else d for d in docs]
-        for update in history.build(docs, model, thinking, vault.document_field_definitions(), intake.document_types(), evaluation, header):
-            vault.touch()  # a long build counts as activity, so MindChart stays unlocked
-            if "document_read" in update:
-                read = update["document_read"]
-                vault.save_document_facts(docs[read["index"]]["id"], read["info"], read["facts"], model, read.get("filled"))
-                continue
-            if "result" in update:
-                update["draft_id"] = vault.save_draft(patient_uid, model, update["result"])
-            self.stream_line(update)
+        return {"build_id": start_build(patient_uid, docs, model, thinking, data.get("reread"), evaluation, header)["id"]}
 
     def chat(self, payload):
         """Forward a chat to Ollama and stream the reply back, one JSON line per chunk."""

@@ -1,4 +1,5 @@
-"""Background work, one job at a time while MindChart is unlocked: identifying uploads, then reading documents.
+"""Background work, one job at a time while MindChart is unlocked: identifying uploads, then reading documents, then
+dating facts read before facts were dated.
 
 Uploads come first, since the clinician is waiting on their review cards. Confirmed documents are then read
 (facts pulled out, fields filled in) so drafting a history later only has to write. The work stops while
@@ -68,6 +69,20 @@ def step(choose_model):
         read(doc, *choose_model())
         STATUS["current"] = None
         return True
+
+    batch = vault.next_facts_to_tag()  # facts read before they were dated (MindChart 0.11)
+    if batch:
+        STATUS.update(current={"kind": "tag", "name": batch["name"], "progress": "Dating its facts"}, note="")
+        try:
+            tags = history.tag_facts(*choose_model(), batch)
+        except history.AIUnavailable:
+            raise
+        except Exception as error:  # left undated rather than asked about forever
+            log.warning("Couldn't tag facts: %s", type(error).__name__)
+            tags = {f["id"]: ("", "") for f in batch["facts"]}
+        vault.save_fact_tags(tags)
+        STATUS["current"] = None
+        return True
     return False
 
 
@@ -83,7 +98,7 @@ def read(doc, model, thinking):
                 STATUS["current"]["progress"] = text.replace("Reading, part", "Part")
             elif "document_read" in update:
                 read_ = update["document_read"]
-                vault.save_document_facts(doc["id"], read_["info"], read_["facts"], model, read_["filled"])
+                vault.save_document_facts(doc["id"], read_["info"], read_["facts"], model, read_["filled"], [p["text"] for p in doc["pages"]])
     except (PermissionError, history.AIUnavailable):
         raise
     except Exception as error:

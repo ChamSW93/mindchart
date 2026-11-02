@@ -18,6 +18,7 @@ import zipfile
 from xml.sax.saxutils import escape
 
 import fields as fieldtypes
+import picture
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 CONTEXT_LENGTH = 16384
@@ -89,16 +90,32 @@ HALLUCINATION_WARNING = ("Drafted by the AI on this Mac. AI can leave things out
                          "(\"hallucinate\"). Check every sentence against the source it cites before using any of it. "
                          "Diagnoses and recommendations come only from the clinician's own notes.")
 
+# How each fact is tagged, so MindChart can tell which facts are current (picture.py). Used when reading and when
+# tagging facts read before tags existed.
+TAG_RULES = """- "kind": "Event" if it happened at one point in time (an admission, a hospitalization, an incident, an arrest, a
+  medication started or stopped, a test given and its scores); "Ongoing" if it was still true when the record was written
+  and can change later (grade, school, placement, who the youth lives with, custody, legal status, medications taken and
+  their doses, diagnoses, therapy and services, symptoms, behavior, sleep, substance use); "Background" if it won't change
+  (birth and developmental history, family history, early childhood). A situation the record says is over ("lived with
+  his grandmother until 2019") is an Event.
+- "topic": for an Ongoing fact, what it's about, using one of these: grade, school (which school or class),
+  special education, placement (where the youth lives: residential, foster care, home), lives with, guardianship
+  (who has legal custody), legal status, sleep, appetite, or "medication: <name>",
+  "diagnosis: <name>", "symptom: <symptom>", "behavior: <behavior>", "therapy: <type>", "service: <service>",
+  "substance: <substance>", "visitation: <with whom>". Empty for Events and Background.
+- Write an Ongoing fact as the record states it, without "currently" or "now": MindChart dates it.
+"""
 EXTRACT_RULES = """You help a psychiatric nurse practitioner gather the history for a child and adolescent psychiatric evaluation. You will be given an excerpt from one source record.
 
 List every clinically relevant fact in the excerpt. Rules:
 - Only facts the text states. Never guess, infer, interpret or add diagnoses.
 - Never calculate ages, durations or dates; copy them only as written.
 - One fact per item, written as one short clinical sentence in the third person.
-- "date": when the event happened, exactly as written in the text (empty if not stated).
+- "date": when it happened (for an Ongoing fact, the date it was true, if the text gives one), exactly as written in
+  the text (empty if not stated).
 - "quote": copy 5 to 30 consecutive words EXACTLY as they appear in the excerpt that support the fact. Do not paraphrase the quote.
 - "section": the best category below.
-- Skip letterheads, signatures, page numbers, form instructions and legal boilerplate.
+""" + TAG_RULES + """- Skip letterheads, signatures, page numbers, form instructions and legal boilerplate.
 """
 EVALUATION_NOTES_RULE = """
 This excerpt is the clinician's OWN notes from the evaluation being written now. What they found, observed, assessed,
@@ -126,10 +143,12 @@ def extract_schema(evaluation_notes=False):
                         "section": {"type": "string", "enum": [key for key, _, _ in sections]},
                         # Length limits stop the model getting stuck repeating itself inside a field.
                         "fact": {"type": "string", "maxLength": 400},
+                        "kind": {"type": "string", "enum": picture.KINDS},
+                        "topic": {"type": "string", "maxLength": 60},
                         "date": {"type": "string", "maxLength": 40},
                         "quote": {"type": "string", "maxLength": 300},
                     },
-                    "required": ["section", "fact", "date", "quote"],
+                    "required": ["section", "fact", "kind", "topic", "date", "quote"],
                 },
             }
         },
@@ -138,6 +157,25 @@ def extract_schema(evaluation_notes=False):
 
 
 EXTRACT_PROMPT, EXTRACT_SCHEMA = extract_prompt(), extract_schema()
+
+# The clinician's corrections to facts read from earlier documents of the same type (vault.reading_guidance). They come
+# from other patients' records, so the AI is told never to take anything from them; a fact copied from one would be
+# dropped anyway, as its quote isn't in the document being read.
+GUIDANCE_NOTE = """
+How the clinician corrected facts read from earlier records of this type. Read this excerpt the same way. These examples
+come from OTHER patients' records: never copy a fact, name, date or any other detail from them.
+{examples}"""
+
+
+def with_guidance(prompt, guidance):
+    def shown(f):
+        tags = "; ".join(x for x in (f["section"], f.get("kind"), f.get("topic")) if x)
+        return f'[{tags}] {f["fact"]}{" (date: " + f["date"] + ")" if f.get("date") else ""}'
+    lines = [f'- From the text "{g["quote"]}" the AI wrote {shown(g["found"])}. '
+             + (f'The clinician corrected it to {shown(g["corrected"])}.' if g.get("corrected") else "The clinician removed it: don't list facts like that.")
+             for g in guidance or []]
+    return prompt + GUIDANCE_NOTE.format(examples="\n".join(lines)) if lines else prompt
+
 
 IDENTIFY_PROMPT = """Identify this clinical record from its file name and opening text.
 - document_type: the closest type:
@@ -185,6 +223,9 @@ Write the "{title}" section using ONLY the numbered facts provided, as a list of
 - Only include facts that belong in this section; leave out any that belong elsewhere.
 - Keep every specific detail: each score, dose, date, frequency and name. Don't summarize them away.
 - Combine facts that repeat across documents into one sentence citing all of them.
+- A fact marked EARLIER was true in the past, and a newer record on the same topic has replaced it (say, 10th grade in
+  2023 and 11th grade in 2024). Never describe it as current; mention it only to show how things changed, with its date.
+- Facts on the same topic from different dates show change over time, not a disagreement: don't list them as conflicts.
 - If facts disagree (for example different dates, diagnoses, doses or accounts), say so in a sentence citing both, and also list each disagreement in "conflicts"."""
 
 WRITE_SCHEMA = {
@@ -556,6 +597,7 @@ def extract_facts(model, thinking, doc, chunk):
     excerpt = f"Source: {doc['document_type']}, dated {doc['document_date'] or 'unknown'}\n\nExcerpt:\n{chunk}"
     notes = doc.get("document_type") == fieldtypes.EVALUATION_NOTES  # the clinician's own notes may fill the evaluation sections
     prompt, schema = (extract_prompt(True), extract_schema(True)) if notes else (EXTRACT_PROMPT, EXTRACT_SCHEMA)
+    prompt = with_guidance(prompt, doc.get("guidance"))
     try:
         facts = ask(model, thinking, prompt, excerpt, schema, max_tokens=6000)["facts"]
         if not notes:  # only they can: a past evaluation's diagnosis is history, not today's finding
@@ -574,6 +616,34 @@ def extract_facts(model, thinking, doc, chunk):
             raise
         middle = chunk.rfind("\n", 0, len(chunk) // 2) + 1 or len(chunk) // 2
         return extract_facts(model, thinking, doc, chunk[:middle]) + extract_facts(model, thinking, doc, chunk[middle:])
+
+
+TAG_PROMPT = """You help a psychiatric nurse practitioner sort the facts found in one of a youth's records by when they were
+true. For each numbered fact, give its number and:
+""" + TAG_RULES
+
+TAG_SCHEMA = {
+    "type": "object",
+    "properties": {"tags": {"type": "array", "items": {
+        "type": "object",
+        "properties": {"number": {"type": "integer"}, "kind": {"type": "string", "enum": picture.KINDS},
+                       "topic": {"type": "string", "maxLength": 60}},
+        "required": ["number", "kind", "topic"]}}},
+    "required": ["tags"],
+}
+
+
+def tag_facts(model, thinking, doc):
+    """Tags for facts read before facts were tagged (vault.next_facts_to_tag): {fact id: (kind, topic)}. Facts the AI
+    leaves out get no tag."""
+    lines = [f"Record: {doc['document_type']}, dated {doc['document_date'] or 'unknown'}", "Facts:"]
+    lines += [f"[{n}] ({f['section']}{'; date: ' + f['date'] if f['date'] else ''}) {f['fact']}" for n, f in enumerate(doc["facts"], 1)]
+    reply = ask(model, thinking, TAG_PROMPT, "\n".join(lines), TAG_SCHEMA, max_tokens=60 * len(doc["facts"]) + 200)
+    tags = {f["id"]: ("", "") for f in doc["facts"]}
+    for t in reply.get("tags", []):
+        if 0 < t.get("number", 0) <= len(doc["facts"]) and t.get("kind") in picture.KINDS:
+            tags[doc["facts"][t["number"] - 1]["id"]] = (t["kind"], (t.get("topic") or "").strip() if t["kind"] == "Ongoing" else "")
+    return tags
 
 
 def chunk_pages(pages):
@@ -606,14 +676,18 @@ def trigrams(words):
     return {tuple(words[i:i + 3]) for i in range(len(words) - 2)}
 
 
-def locate(quote, pages):
+def locate(quote, pages, fact=None):
     """Find which page a quote comes from. Returns (found, page number or None).
 
     Exact match first; then a looser match (80% of three-word runs present) so small
     OCR errors or the model fixing a typo don't count against it.
+    A two-word quote (terse notes such as "affect constricted") counts only when it's on a page word for word and the
+    fact uses both its words, so a common pair of words can't vouch for an unrelated fact.
     """
     q = normalize(quote)
     words = q.split()
+    if len(words) == 2 and fact and set(words) <= set(normalize(fact).split()):
+        return next(((True, p["page"]) for p in pages if f" {q} " in f" {p['normalized']} "), (False, None))
     if len(words) < 3:
         return False, None
     for p in pages:
@@ -682,8 +756,10 @@ def read_document(doc, label, model, thinking, document_fields=None, pull=None, 
             for f in found:
                 if not f.get("fact", "").strip():
                     continue
-                verified, page = locate(f.get("quote", ""), doc["pages"])
-                facts.append({**f, "page": page, "verified": verified})
+                verified, page = locate(f.get("quote", ""), doc["pages"], f.get("fact"))
+                kind = f.get("kind") if f.get("kind") in picture.KINDS else ""
+                facts.append({**f, "kind": kind, "topic": (f.get("topic") or "").strip() if kind == "Ongoing" else "",
+                              "page": page, "verified": verified})
             done += 1
 
     wanted = [d for d in (document_fields or {}).get(doc["document_type"]) or []
@@ -712,7 +788,10 @@ Write it the way a clinician writes an evaluation, not a summary of the file:
   suicide attempts, hospitalizations, abuse, court orders, medication trials and why they stopped.
 - Keep the key specifics: diagnoses, medications with doses, test scores, placements, legal status.
 - When you combine facts, keep each date and number with its own event.
-- Call something current only if it's the most recent information by source date; earlier sources describe the past.
+- Call something current only if its fact is marked current; earlier sources describe the past.
+- A fact marked EARLIER was true in the past, and a newer record on the same topic has replaced it (say, 10th grade in
+  2023 and 11th grade in 2024). Never describe it as current; mention it only to show how things changed, with its date.
+- Facts on the same topic from different dates show change over time, not a disagreement: don't list them as conflicts.
 - For each sentence, list the numbers of the facts it relies on in "facts". Every sentence needs at least one.
 - Never add information that is not in the facts. Do not diagnose or interpret.
 - Never calculate ages, durations or dates; say which source date a "current" detail is as of.
@@ -726,12 +805,16 @@ SECTION_LENGTH = {"identifying": "one or two sentences on details such as school
                   "recommendations": "one recommendation per sentence"}
 CORE_EVALUATION_SECTIONS = ("mse", "impression", "diagnoses", "recommendations")  # shown even when empty, to be filled in
 
+PREFERENCES_NOTE = """
+How this clinician likes it written (follow these, as long as they don't break the rules above):
+{preferences}"""
+
 EVALUATION_WRITE_NOTE = """
 These facts come from the clinician's own notes from this evaluation. Keep their clinical judgments exactly as they
 wrote them: list diagnoses word for word, and never add a diagnosis, risk level or recommendation they didn't write."""
 
 
-def build(documents, model, thinking, document_fields=None, types=None, evaluation=False, header=None):
+def build(documents, model, thinking, document_fields=None, types=None, evaluation=False, header=None, preferences=()):
     """Run the whole process, yielding progress updates and finally the result.
 
     documents: [{"name": "file.pdf", "pages": [{"page", "text", "scanned"}, ...]}, ...]
@@ -744,6 +827,8 @@ def build(documents, model, thinking, document_fields=None, types=None, evaluati
     rather than the history alone.
     header: [(label, value)] about the evaluation itself (patient, birth date, evaluator...), taken from the patient's record
     rather than written by the AI, shown at the top.
+    preferences: the clinician's writing preferences (vault.writing_preferences), followed when writing an evaluation.
+    Each section keeps the AI's own text in "ai_narrative", so the clinician's edits can be compared with it later.
     """
     order = EVALUATION_ORDER if evaluation else [key for key, _, _ in SECTIONS]
     for doc in documents:
@@ -769,12 +854,17 @@ def build(documents, model, thinking, document_fields=None, types=None, evaluati
                 yield update
         step += len(doc["chunks"]) + 1
 
+    for f in facts:  # when each was true: the newest ongoing fact on each topic is current (picture.py)
+        f["document_date"] = documents[f["doc"]].get("document_date") or ""
+    picture.annotate(facts)
+
     sections = []
     for key in order:
         title = SECTION_TITLES[key]
         yield {"progress": f"Writing {title}", "step": step, "total": total}
         wanted = ("presentation", "hpi") if evaluation and key == "hpi" else (key,)  # today's interview first, then the history
-        section_facts = sorted((f for f in facts if f["section"] in wanted), key=lambda f: wanted.index(f["section"]))
+        section_facts = sorted((f for f in facts if f["section"] in wanted),  # earlier facts last, after what's current
+                               key=lambda f: (wanted.index(f["section"]), f.get("status") == "earlier"))
         usable = [f for f in section_facts if f["verified"]]
         if evaluation and not usable and key not in CORE_EVALUATION_SECTIONS:
             step += 1
@@ -785,25 +875,27 @@ def build(documents, model, thinking, document_fields=None, types=None, evaluati
             numbered = "\n".join(
                 # The event's date goes inside the source note, so it isn't copied into the text as "Date: ...".
                 f"[{n}] (source: {documents[f['doc']]['document_type']}, {documents[f['doc']]['document_date'] or 'undated'}"
-                f"{'; happened: ' + f['date'] if f['date'] else ''}) {f['fact']}"
+                f"{'; happened: ' + f['date'] if f['date'] else ''}{when_note(f)}) {f['fact']}"
                 for n, f in enumerate(usable, 1)
             )
             try:
                 prompt = (EVALUATION_PROMPT.format(title=title, length=SECTION_LENGTH.get(key, "two to five sentences")) if evaluation
                           else WRITE_PROMPT.format(title=title)) + (EVALUATION_WRITE_NOTE if key in EVALUATION_KEYS else "")
+                if evaluation and preferences:
+                    prompt += PREFERENCES_NOTE.format(preferences="\n".join(f"- {p}" for p in preferences))
                 written = ask(model, thinking, prompt, f"Facts:\n{numbered}", WRITE_SCHEMA, max_tokens=8000)
                 narrative = join_sentences(written["sentences"], usable, documents)
                 conflicts = unsupported_details(written["sentences"], usable, documents) + [
                     {"description": unnumbered(c["description"]),
                      "sources": "; ".join(dict.fromkeys(cite(usable[n - 1], documents) for n in c["facts"] if 0 < n <= len(usable)))}
-                    for c in written.get("conflicts", []) if c.get("description")
+                    for c in written.get("conflicts", []) if c.get("description") and not change_over_time(c.get("facts") or [], usable)
                 ]
             except Exception as error:
                 # Fall back to the verified facts themselves, each with its source, so nothing is lost.
                 yield {"warning": f"Couldn't write {title} as a paragraph ({type(error).__name__}); listed its facts instead"}
                 narrative = " ".join(f"{f['fact'].rstrip('.')}. [{cite(f, documents)}]" for f in usable)
         sections.append({
-            "key": key, "title": title, "narrative": narrative, "conflicts": conflicts,
+            "key": key, "title": title, "narrative": narrative, "ai_narrative": narrative, "conflicts": conflicts,
             "facts": [{**f, "source": cite(f, documents)} for f in section_facts],
         })
         step += 1
@@ -821,6 +913,68 @@ def build(documents, model, thinking, document_fields=None, types=None, evaluati
             for i, d in enumerate(documents)
         ],
     }, "step": total, "total": total}
+
+
+LEARN_PROMPT = """You help a child and adolescent psychiatric nurse practitioner teach an AI to write psychiatric evaluations
+the way they do. You'll see sections of an evaluation as the AI drafted them and as the clinician rewrote them.
+
+Work out what the changes say about how the clinician likes ANY evaluation written: tone, length, order, wording, terms,
+what to put first and what to leave out. Rules:
+- Up to 5 preferences, each one short instruction, such as "Refer to the patient as 'the youth'".
+- Only general habits that would apply to every patient. Never include a name, date, age, place, school, medication,
+  dose, diagnosis, score, event or any other detail about this patient.
+- Changes that only add, remove or correct facts about this patient aren't preferences: skip them.
+- Don't repeat a preference the clinician already has (listed first, if any). If nothing general can be learned,
+  return an empty list."""
+
+LEARN_SCHEMA = {
+    "type": "object",
+    "properties": {"preferences": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 200}}},
+    "required": ["preferences"],
+}
+
+
+def edited_sections(result):
+    """The sections of a saved draft the clinician changed: [(title, the AI's text, theirs)]."""
+    return [(s["title"], s["ai_narrative"], s["narrative"]) for s in result.get("sections", [])
+            if s.get("ai_narrative") and " ".join(s["narrative"].split()) != " ".join(s["ai_narrative"].split())]
+
+
+def learn_preferences(model, thinking, result, known=(), private=()):
+    """General writing preferences the AI sees in the clinician's edits to a draft, for them to approve. private: words
+    that mustn't appear in one (the patient's and family's names). Preferences with digits (dates, doses, scores), any
+    private word or a medication name are dropped, as they'd be about this patient rather than about writing."""
+    edits = edited_sections(result)
+    if not edits:
+        raise ValueError("Edit the draft and save it first: there's nothing to learn from yet")
+    lines = ["Preferences the clinician already has:", *[f"- {p}" for p in known]] if known else []
+    for title, before, after in edits:
+        lines += [f"\nSection: {title}", f"AI's draft:\n{before}", f"Clinician's version:\n{after}"]
+    found = ask(model, thinking, LEARN_PROMPT, "\n".join(lines), LEARN_SCHEMA, max_tokens=1500).get("preferences", [])
+    names = [w for w in private if len(w) > 2] + [n for m in fieldtypes.medication_catalog() for n in [m["name"], *m["brands"]]]
+    blocked = re.compile(r"\d|\b(?:" + "|".join(re.escape(n) for n in names) + r")\b", re.I)
+    kept = []
+    for text in (" ".join(str(f).split()) for f in found):
+        if text and not blocked.search(re.sub(r"\b(?:DSM-5(?:-TR)?|ICD-1[01])\b", "", text)) and text.lower() not in {p.lower() for p in [*known, *kept]}:
+            kept.append(text)
+    return kept
+
+
+def when_note(f):
+    """How a numbered fact is marked for the writer: current or earlier (ongoing facts), from picture.annotate."""
+    if f.get("status") == "current":
+        return f"; current as of {f['as_of']}" if f.get("as_of") else "; current"
+    if f.get("status") == "earlier":
+        return f"; EARLIER, replaced by a newer record{' of ' + f['newer'] if f.get('newer') else ''}"
+    return ""
+
+
+def change_over_time(numbers, usable):
+    """Whether a "disagreement" the model listed is only one topic changing over time (10th grade in 2023, 11th in 2024):
+    every fact it cites is on the same topic, and some are earlier. Those aren't shown as conflicts."""
+    cited = [usable[n - 1] for n in numbers if 0 < n <= len(usable)]
+    return (len(cited) > 1 and len({f.get("topic_key") for f in cited}) == 1 and bool(cited[0].get("topic_key"))
+            and any(f.get("status") == "earlier" for f in cited))
 
 
 def join_sentences(sentences, usable, documents):
