@@ -133,6 +133,7 @@ function showSignin(message = "") {
   state.dirtyDraft = false;
   $("#app").hidden = true;
   $("#view").innerHTML = "";          // take patient data off the page
+  $("#nav").innerHTML = "";           // (chat names too)
   $("#commandResult").hidden = true;
   $("#commandResult").innerHTML = "";
   $("#signin").hidden = false;
@@ -183,14 +184,22 @@ setInterval(async () => {
   if (!session.unlocked) { state.session = { ...state.session, ...session }; showSignin("MindChart was locked. Enter your password to continue."); }
 }, 30000);
 
+// The records features (people, uploads, documents, cottages and the rest) are on hold while MindChart is a chat-first
+// assistant; the server says whether they're shown (MINDCHART_RECORDS=1). Their screens are kept in reserve below.
+const records = () => !!state.session?.records;
+
 async function enterApp() {
   $("#signin").hidden = true;
   $("#app").hidden = false;
-  const objects = await api("GET", "objects");
+  document.body.classList.toggle("chat-first", !records());
+  $("#brandLine").textContent = records() ? "Psychiatric records" : "Psychiatric NP assistant";
+  const [objects, settings] = await Promise.all([api("GET", "objects"), api("GET", "settings")]);
   state.objects = objects.objects;
   state.sectionTitles = objects.section_titles;
+  state.session.user_name = settings.user_name;
   await loadModels();
-  await refreshWork();
+  if (records()) await refreshWork();
+  showAiStatus();
   await route();
   maybeStartTour();  // the first time (and once after updating to a version with the tour)
 }
@@ -239,7 +248,13 @@ window.addEventListener("beforeunload", (e) => { if (state.dirtyDraft) e.prevent
 
 function renderNav() {
   const here = location.hash || "#/";
-  const items = [["#/", "Home", "i-home"], ["#/uploads", "Uploads", "i-upload"], ["#/list/patients", "Patients", ICONS.patients],
+  const chats = '<a href="#/" class="new-chat"><span class="i-spark"></span>New chat</a><div class="chat-list" id="chatList"></div>';
+  if (!records()) {
+    $("#nav").innerHTML = chats + `<a href="#/settings" class="${here === "#/settings" ? "active" : ""}"><span class="i-settings"></span>Settings</a>`;
+    renderChatList();
+    return;
+  }
+  const items = [["#/", "Chat", "i-spark"], ["#/home", "Home", "i-home"], ["#/uploads", "Uploads", "i-upload"], ["#/list/patients", "Patients", ICONS.patients],
     ["#/list/guardians", "Guardians", ICONS.guardians],
     ...["cottages", "incidents", "follow_ups", "medications", "documents", "facts", "drafts", "activity"]
     .map((o) => [`#/list/${o}`, state.objects[o].plural, ICONS[o]]), ["#/settings", "Settings", "i-settings"]];
@@ -270,8 +285,13 @@ async function route() {
   renderNav();
   state.medicationNames = null;
   const parts = (location.hash.slice(1) || "/").split("/").filter(Boolean);
+  const chatting = !parts.length || parts[0] === "chat" || (!records() && parts[0] !== "settings");
+  document.querySelector("main").classList.toggle("chat-main", chatting);  // the chat fills the page
   try {
-    if (!parts.length) await homeView();
+    if (!parts.length || parts[0] === "chat") await chatView(parts[1] ? decodeURIComponent(parts[1]) : null);
+    else if (parts[0] === "settings") await settingsView();
+    else if (!records()) await chatView(null);  // the records screens are on hold
+    else if (parts[0] === "home") await homeView();
     else if (parts[0] === "list") await (parts[1] === "guardians" ? listView("patients", "", "Legal Guardian") : listView(parts[1]));
     else if (parts[0] === "r") await recordView(parts[1], decodeURIComponent(parts[2]));
     else if (parts[0] === "settings") await settingsView();
@@ -1854,17 +1874,17 @@ async function learnedCard(data) {
   if (!card) return;
   try { data = data || await api("GET", "learned"); } catch (err) { card.querySelector(".muted").textContent = err.message; return; }
   card.innerHTML = `<h2>What MindChart has learned from you</h2>
-    <h3>Corrected facts</h3>
+    ${records() ? `<h3>Corrected facts</h3>
     <p class="muted small">When you correct or delete a fact the AI found, MindChart shows the AI your ${data.examples_each} most recent
       corrections for that type of document the next time it reads one. Quotes from other patients' records are never added as facts:
       the AI's facts must be found in the document it's reading.</p>
     ${data.corrections.length ? `<div class="learned-list">${data.corrections.map((c) => `<div class="learned-row"><span class="grow">${esc(c.type)}
       <span class="muted small">${c.count} correction${c.count === 1 ? "" : "s"}</span></span>
       <button class="link small" data-forget="${esc(c.type)}">Forget</button></div>`).join("")}</div>`
-      : '<p class="empty small">None yet. Correct a fact on any document page and it will appear here.</p>'}
-    <h3>How you like evaluations written</h3>
-    <p class="muted small">Followed every time MindChart writes an evaluation. Add them here, or have MindChart suggest some from your edits
-      to an evaluation draft. Keep them general: no patient details.</p>
+      : '<p class="empty small">None yet. Correct a fact on any document page and it will appear here.</p>'}` : ""}
+    <h3>How you like things written</h3>
+    <p class="muted small">${records() ? "Followed every time MindChart writes an evaluation. Add them here, or have MindChart suggest some from your edits to an evaluation draft."
+      : "Followed in everything MindChart writes for you in chat, such as evaluations and notes."} Keep them general: no patient details.</p>
     <div class="learned-list">${data.preferences.map((p) => `<div class="learned-row" data-pref="${p.id}">
       <input type="text" value="${esc(p.text)}" maxlength="300" class="grow" aria-label="Writing preference">
       <button class="link small" data-save-pref hidden>Save</button><button class="link small" data-delete-pref>Delete</button></div>`).join("")}</div>
@@ -1932,10 +1952,10 @@ async function settingsView() {
     <div class="card"><h2>Getting to know MindChart</h2>
       <p class="muted small">The tour shows each part of MindChart in about two minutes. Press ? on any page for help with that page.</p>
       <div class="actions"><button class="secondary small" id="startTour">Take the tour</button>
-        <button class="secondary small" id="showChecklist">Show the getting-started checklist on Home</button></div></div>`;
+        ${records() ? '<button class="secondary small" id="showChecklist">Show the getting-started checklist on Home</button>' : ""}</div></div>`;
   $("#startTour").onclick = () => startTour();
   $("#securityHelp").onclick = () => openHelp("security");
-  $("#showChecklist").onclick = async () => { await api("POST", "settings/checklist", { state: "" }); location.hash = "#/"; };
+  if ($("#showChecklist")) $("#showChecklist").onclick = async () => { await api("POST", "settings/checklist", { state: "" }); location.hash = "#/home"; };
 
   $("#nameForm").onsubmit = async () => {
     try { await api("POST", "settings/name", { name: $("#nameForm [name=name]").value }); toast("Name saved ✓"); }
@@ -2041,7 +2061,13 @@ document.addEventListener("drop", (e) => {
   e.preventDefault();
   dragDepth = 0;
   document.body.classList.remove("dropping");
-  if (!$("#app").hidden) uploadFiles(e.dataTransfer.files, currentPatient());
+  if ($("#app").hidden) return;
+  if (!records()) {  // files dropped on the chat are attached to the next message
+    if (!document.getElementById("chatInput")) location.hash = "#/";
+    until(() => document.getElementById("chatInput")).then(() => attachFiles([...e.dataTransfer.files]));
+    return;
+  }
+  uploadFiles(e.dataTransfer.files, currentPatient());
 });
 
 function currentPatient() {
@@ -2077,7 +2103,7 @@ async function uploadFiles(files, patientUid = null) {
 
 // What's happening in the background, shown in the sidebar. Review cards update as the AI finishes with them.
 async function refreshWork() {
-  if ($("#app").hidden) return;
+  if ($("#app").hidden || !records()) return;
   let work;
   try { work = await api("GET", "work"); } catch { return; }
   const before = state.work;

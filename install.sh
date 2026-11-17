@@ -74,14 +74,18 @@ SAMPLES="$HOME/Documents/MindChart sample records (fictional)"  # easy to find w
 mkdir -p "$SAMPLES" && cp "$DEST/sample-records/"* "$SAMPLES/"
 
 # 5. The AI model that suits this Mac's memory (MindChart's own recommendation, from models.py).
+# Ollama runs just for the download, quietly, then stops: MindChart starts it itself when the AI is needed.
 MODEL="$(/usr/bin/python3 "$DEST/models.py" --recommended)"
+SERVE=""
 if ! curl -s http://localhost:11434/api/version > /dev/null; then
-  open -a Ollama
+  "$OLLAMA" serve > /dev/null 2>&1 &
+  SERVE=$!
   for _ in $(seq 1 30); do curl -s http://localhost:11434/api/version > /dev/null && break; sleep 1; done
 fi
 echo ""
 echo "Downloading the AI model ($MODEL). This is several GB and can take a while..."
 "$OLLAMA" pull "$MODEL"
+[ -n "$SERVE" ] && kill "$SERVE" 2> /dev/null
 
 echo ""
 echo "Done! MindChart is in $WHERE (and Launchpad). Opening it now..."

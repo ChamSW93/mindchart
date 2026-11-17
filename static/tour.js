@@ -17,6 +17,15 @@ const SECURITY_HELP = {
 };
 
 const HELP = {
+  chat: { title: "Chat", intro: "Ask MindChart, an assistant with the knowledge of an experienced psychiatric nurse practitioner.", items: [
+    ["What it can do", "Draft psychiatric evaluations, progress notes and mental status exams from your notes; think through differential diagnoses, medications and monitoring; build safety plans; and explain things to families in plain language."],
+    ["Start quickly", "On a new chat, pick one of the tasks to start your message, then add your notes or question."],
+    ["Attach files", "Click the paperclip, or drop PDFs, Word files, photos or faxes onto the window. They're read on this Mac (scans and photos too) and sent along with your next message. Typed or dictated notes work far better than photos of handwriting."],
+    ["It works only from what you give it", "It's told never to invent patient details: anything missing in a draft is marked [not documented]. Ages, time between dates and rating-scale scores are worked out exactly, not guessed."],
+    ["Check everything", "The AI can be wrong or make things up. Check every answer against your notes and your own judgment before using it. You make the clinical decisions."],
+    ["Your chats", "They're listed on the left, newest first, and saved encrypted on this Mac. Rename one by clicking its name at the top; Delete removes it for good."],
+    ["The AI starts when you need it", "It isn't running when MindChart opens. It starts when you send a message, which takes a few seconds the first time. Stop AI (bottom left) frees the memory it uses."],
+  ] },
   home: { title: "Home", intro: "Your starting point.", items: [
     ["Ask or log in plain English", "Type in the bar at the top: questions such as “Which patients have an order of protection?”, or things to record, such as “Add a note for Jordan: calm week”."],
     ["Upload documents", "Drop files anywhere in MindChart, or use Upload documents. You'll check each one before it's filed."],
@@ -150,7 +159,7 @@ const HELP = {
 
 function currentScreen() {
   const parts = (location.hash.slice(1) || "/").split("/").filter(Boolean);
-  if (!parts.length) return "home";
+  if (!parts.length || parts[0] === "chat" || (!records() && parts[0] !== "settings")) return "chat";
   if (parts[0] === "list") return `list:${parts[1]}`;
   if (parts[0] === "r") return parts[1] === "patients" && parts[2]?.startsWith("LG-") ? "record:guardians" : `record:${parts[1]}`;
   return HELP[parts[0]] ? parts[0] : "home";
@@ -189,9 +198,9 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#hel
 const TOUR = [
   { title: "Welcome to MindChart", welcome: true,
     body: "Here's a quick look at what MindChart can do. It takes about two minutes. You can skip it and press ? on any page for help instead." },
-  { route: "#/", target: "#nav", title: "Your records",
+  { route: "#/home", target: "#nav", title: "Your records",
     body: "Patients, Documents, Facts, Drafts and Activity, organized like a CRM. Every record has its own ID, such as PT-7K3M9Q." },
-  { route: "#/", target: "#command", title: "Ask or log in plain English",
+  { route: "#/home", target: "#command", title: "Ask or log in plain English",
     body: "Ask a question, such as “Which patients have an order of protection?”, or record something: “Add a note for Jordan: calm week”. Questions never change anything, and anything you record is shown to you to check before it's saved.",
     tip: "Try it after the tour with one of the examples on Home." },
   { route: "#/uploads", target: "#addFiles", title: "Add records",
@@ -213,9 +222,30 @@ const TOUR = [
     body: "MindChart also locks itself after 15 minutes without use, and when you quit." },
   { target: "#helpBtn", title: "Help on every page",
     body: "Press ? to see what you can do on the page you're on. You can take this tour again from Settings." },
-  { route: "#/", target: "#gettingStarted", title: "Your first steps", last: true,
+  { route: "#/home", target: "#gettingStarted", title: "Your first steps", last: true,
     body: "This checklist ticks itself off as you try each feature. Start by adding a patient and uploading the fictional sample records." },
 ];
+// The tour while the records features are on hold: the chat and the essentials.
+const CHAT_TOUR = [
+  { title: "Welcome to MindChart", welcome: true,
+    body: "MindChart is an assistant with the knowledge of an experienced psychiatric nurse practitioner, running privately on this Mac. Here's a one-minute look around." },
+  { route: "#/", target: ".quick-tasks", title: "Start with a task",
+    body: "Pick one to start your message, such as Write a psychiatric evaluation or Medication question, then add your notes. Or just type a question." },
+  { route: "#/", target: "#attachBtn", title: "Attach files",
+    body: "PDFs, Word files, photos and faxes are read on this Mac and sent with your next message. You can also drop them onto the window.",
+    tip: "Typed or dictated notes work far better than photos of handwriting." },
+  { route: "#/", target: ".chat-note", title: "Check everything",
+    body: "MindChart works only from what you give it and marks anything missing, but AI can still be wrong. Check every answer before you use it." },
+  { target: "#chatList", title: "Your chats",
+    body: "Each conversation is saved here, encrypted on this Mac. Rename or delete them any time." },
+  { target: "#aiStatus", title: "The AI starts when you need it",
+    body: "It isn't running when MindChart opens: it starts when you send a message. Stop AI frees its memory when you're done." },
+  { target: "#securePill", title: "Private by design",
+    body: "Everything stays on this Mac, encrypted, and only your password opens it. MindChart locks itself after 15 minutes without use." },
+  { route: "#/", target: "#chatHelp", title: "Help is always here", last: true,
+    body: "Press ? for help on whatever you're looking at. You can take this tour again from Settings." },
+];
+const tourSteps = () => (records() ? TOUR : CHAT_TOUR);
 let tourStep = -1;
 
 async function maybeStartTour() {
@@ -236,7 +266,7 @@ function startTour() {
 
 async function showStep(index) {
   tourStep = index;
-  const step = TOUR[index];
+  const step = tourSteps()[index];
   const tour = document.getElementById("tour");
   if (!tour) return;
   tour.classList.add("moving");
@@ -250,7 +280,7 @@ async function showStep(index) {
   if (target) target.scrollIntoView({ block: "nearest" });
   const card = tour.querySelector(".tour-card");
   card.innerHTML = `
-    ${step.welcome ? '<div class="logo big"></div>' : `<div class="kicker">${index} of ${TOUR.length - 1}</div>`}
+    ${step.welcome ? '<div class="logo big"></div>' : `<div class="kicker">${index} of ${tourSteps().length - 1}</div>`}
     <h2 id="tourTitle">${esc(step.title)}</h2><p>${esc(step.body)}</p>
     ${step.tip ? `<p class="tour-tip">${esc(step.tip)}</p>` : ""}
     ${step.welcome ? '<p class="secure-note"><span class="i-lock secure-icon"></span> Your records are encrypted and stay on this Mac.</p>' : ""}
@@ -328,7 +358,7 @@ function placeTour() {
 function tourKeys(e) {
   if (!document.getElementById("tour")) return;
   if (e.key === "Escape") endTour("skipped");
-  else if (e.key === "ArrowRight" && tourStep < TOUR.length - 1) showStep(tourStep + 1);
+  else if (e.key === "ArrowRight" && tourSteps().length - 1 > tourStep) showStep(tourStep + 1);
   else if (e.key === "ArrowLeft" && tourStep > 1) showStep(tourStep - 1);
 }
 

@@ -28,7 +28,7 @@
   <!-- The app -->
   <div id="app" hidden>
     <aside id="sidebar">
-      <a class="brand" href="#/"><span class="logo"></span><span><b>{{APP_NAME}}</b><small>Psychiatric records</small></span></a>
+      <a class="brand" href="#/"><span class="logo"></span><span><b>{{APP_NAME}}</b><small id="brandLine">Psychiatric NP assistant</small></span></a>
       <div class="mcm-dots" aria-hidden="true"><i></i><i></i><i></i></div>
       <button class="secure-pill" id="securePill" title="How your records are protected">
         <span class="i-lock secure-icon"></span><span>Encrypted · on this Mac</span></button>
@@ -36,8 +36,8 @@
       <div class="sidebar-foot">
         <div class="work" id="work" hidden></div>
         <label class="muted small">AI model (runs on this Mac)<select id="model"></select></label>
+        <div class="ai-status small" id="aiStatus"></div>
         <div class="hardware" id="hardware"></div>
-        <a href="/chat.html" class="small">General chat →</a>
         <button id="lockBtn" class="secondary small"><span class="i-lock"></span> Lock {{APP_NAME}}</button>
       </div>
     </aside>
@@ -59,6 +59,7 @@
   <div id="dropHint" aria-hidden="true"><div><span class="i-upload"></span><b>Drop to upload</b>
     <span>PDFs, Word files, photos and faxes. You'll check each one before it's filed.</span></div></div>
   <script src="/static/app.js"></script>
+  <script src="/static/chat.js"></script>
   <script src="/static/tour.js"></script>
 </body>
 </html>

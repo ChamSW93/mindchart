@@ -95,7 +95,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDe
         guard FileManager.default.fileExists(atPath: home.appendingPathComponent("server.py").path) else {
             return show("MindChart's files weren't found in \(home.path). Please reinstall MindChart.", error: true)
         }
-        run("/usr/bin/open", ["-g", "-a", "Ollama"])  // Ollama runs the AI model; start it quietly if needed
+        // (Ollama isn't started here: MindChart starts it when the AI is first needed, see ai.py)
         // The updater's messages go in the log too, so a problem with updating can be found
         let logs = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/MindChart")
         try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)

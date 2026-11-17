@@ -1,6 +1,8 @@
 # MindChart
 
-A private, offline app for keeping child and adolescent psychiatric records and drafting a **psychiatric evaluation** from many sources: the clinician's own evaluation notes plus the records, past psychiatric and psychological evaluations, clinical notes, IEPs and court orders, as PDFs, Word files, photos or faxes.
+A private, offline **assistant with the knowledge of an experienced psychiatric nurse practitioner**, for clinicians who treat children, adolescents and their families. You chat with it: it drafts evaluations, progress notes and mental status exams from your notes or attached files, thinks through diagnoses, medications and safety plans with you, and explains things to families in plain language.
+
+MindChart started as a records app (a CRM for patients, documents and facts). Those **records features are on hold** while it's chat-first, kept in reserve: see [Records features (on hold)](#records-features-on-hold).
 
 Everything runs on the Mac. The app, its server and the AI model (through [Ollama](https://ollama.com)) never send record contents over the internet.
 
@@ -21,8 +23,30 @@ This puts **MindChart.app** in the Applications folder (and Launchpad), download
 ## Using it
 
 - **Sign in.** The first launch asks for your name (shown in the activity log) and a password, which encrypts all of MindChart's data. Every launch after that asks for the password, or a fingerprint once **Touch ID** is turned on in Settings (the password is then kept encrypted by the Mac's Secure Enclave, and opens only after Touch ID on that Mac). MindChart locks itself after 15 minutes without activity, when 🔒 Lock is clicked, and when the app quits or crashes. After 5 wrong passwords, each further attempt has to wait. **A lost password can't be recovered.** It can be changed in **Settings**.
-- **A tour, and help on every page.** The first time MindChart opens (and once after updating to 0.5.0), a short tour points out each part of the app; it can be skipped. A getting-started checklist on Home ticks itself off as each feature is tried. The **?** button next to the command bar explains what can be done on the current page, and Settings can restart the tour.
+- **A tour, and help on every page.** The first time MindChart opens, a one-minute tour points out the chat, attaching files, checking answers, saved chats and the AI switch; it can be skipped. The **?** button at the top explains what can be done on the current page, and Settings can restart the tour.
 - **Security, in plain language.** A green padlock marks where records are protected: the sign-in screen, the sidebar ("Encrypted · on this Mac"), Uploads and Settings. Clicking it explains, in plain terms, what keeps records private and what's up to the clinician (exported Word files, the Mac's own FileVault and screen lock).
+
+### The chat (MindChart's home)
+
+- **A psychiatric NP assistant.** Its instructions (`agent.py`) cover how a child and adolescent PMHNP assesses (interviews, mental status, DSM-5-TR differentials, rating scales), keeps youth safe (suicide, self-harm and violence risk, safety plans, abuse and mandated reporting), prescribes (FDA approvals and boxed warnings for youth, starting doses, side effects, monitoring) and documents (evaluations, SOAP notes, treatment plans, discharge summaries, letters).
+- **It works only from what you give it.** It's told never to invent patient details, and to write `[not documented]` where something is missing in a draft. It keeps what was reported apart from its own reasoning, offers diagnoses as differentials, puts any sign of risk at the top, says whether a medication is FDA-approved for the youth's age or used off-label, and ends dosing answers by saying to check current prescribing information.
+- **Exact tools for what AI gets wrong.** Ages, time between dates and rating-scale scores (PHQ-A, PHQ-9, GAD-7, SCARED, CRAFFT, with their published bands) are worked out by MindChart, not guessed by the model. Scores typed into a message are also scored by MindChart before the AI answers, shown under the message, and a PHQ-A item 9 above 0 is flagged in red, so it's never missed however the model reads the message.
+- **Quick tasks** start a message: Write a psychiatric evaluation, Write a progress note, Mental status exam, Differential diagnosis, Medication question, Safety plan, Summarize a document, Explain it to a family.
+- **Attach files** with the paperclip or by dropping them on the window: PDFs, Word files, photos and faxes are read on the Mac (with OCR) and sent with the next message. Hard-to-read pages (handwriting) are flagged.
+- **Saved, private chats.** Conversations are listed on the left, newest first, kept in the encrypted store, and can be renamed or deleted (deleting wipes them). Starting, opening and deleting a chat is recorded in the activity log, without its contents.
+- **Answers keep going.** Each answer is written on its own and the page follows it, so a reload or a dropped connection loses nothing, and **Stop** keeps what's written so far. The writing preferences in Settings are followed in everything it writes.
+- **Strong warnings.** Under the message box: the AI can be wrong or make things up, so check everything, and the clinician makes the clinical decisions.
+
+### The AI starts when it's needed
+
+Ollama (which runs the AI model) **isn't started when MindChart opens**. It starts, quietly and without a menu bar icon, the first time a message is sent, which takes a few seconds, and it stops when MindChart quits. The bottom left shows whether it's on; **Stop AI** frees its memory at once (useful on an 8 GB Mac), and it starts again with the next message. If Ollama was already open, MindChart uses it and leaves it running. Background work never starts it. The installer runs Ollama only while downloading the model.
+
+On an 8 GB Mac the chat uses a smaller working memory (8K tokens instead of 16K) and shorter answers, and long conversations keep their newest messages, so the model stays within the Mac's memory.
+
+### Records features (on hold)
+
+> On hold since November 2026, while MindChart is chat-first, and kept in reserve: their code, data, routes and tests are all still here, and records already saved stay untouched in the encrypted store. Starting the server with `MINDCHART_RECORDS=1` shows them again (with the chat still as Home), and turns their background reading back on.
+
 - **Records, like a CRM.** Patients, Guardians, Cottages, Incidents, Follow-ups, Medications, Documents, Facts, Drafts and Activity each have a list view and record pages. Every record has its own ID with a prefix for its type, such as `PT-7K3M9Q` (patient), `LG-…` (legal guardian), `CTG-…` (cottage), `INC-…` (incident), `FUP-…`, `MED-…`, `MSR-…` (measure), `DOC-…`, `FCT-…`, `DRF-…` and `ACT-…`.
 - **Dates.** Every date box can be typed into or filled from a small calendar, with month and year lists for dates of birth. The slashes go in as you type ("12271994" becomes 12/27/1994, "3/4/24" becomes 03/04/2024), and a day that doesn't exist is flagged before saving. Partial dates from the records, like "2019", are kept as written.
 - **Legal guardians.** A patient can have several, and a guardian several patients. A guardian's **ZIP code** gives their town and a rough drive time from Children's Village, worked out on the Mac from a built-in ZIP code table (nothing is looked up online).
@@ -135,7 +159,8 @@ macOS "Reduce motion" turns animations off. Other downloaded models can be picke
 scripts/test.sh
 ```
 
-171 automated tests cover:
+183 automated tests cover:
+- the chat: the assistant's tools (ages, dates, rating scales), MindChart's own scoring of rating scales in a message, the conversation it's given (instructions, files, trimming), saved chats, answers written as jobs (stopping and trying again), and starting and stopping the AI only when needed
 - document reading, including OCR of scans, photos, sideways pages and pictures in Word files
 - uploads, patient matching (including the wrong-sibling warning) and learning document types
 - background reading, quote checking and citations, and the drafting flow
@@ -147,7 +172,9 @@ scripts/test.sh
 - medications (including suggestions from the records), rating scales and their bands, follow-ups, Coming up and the timeline
 - visit notes, and searching inside documents
 - AI-filled fields, the encrypted store, the audit trail, sign-in limits, password changes and Touch ID
-- data upgrades, the command bar, the getting-started checklist, the server's security checks and the updater They run on **Apple's built-in Python** (the one every Mac has), so code that only works with a newer Python can't slip through. They also run automatically on GitHub for every change. They don't need the AI model: stand-in answers take its place.
+- data upgrades, the command bar, the getting-started checklist, the server's security checks and the updater.
+
+They run on **Apple's built-in Python** (the one every Mac has), so code that only works with a newer Python can't slip through. They also run automatically on GitHub for every change. They don't need the AI model: stand-in answers take its place.
 
 ## Updates
 
@@ -176,10 +203,11 @@ This runs the tests (and stops if any fail), builds the PDF reader and the Mac a
 | `learning.py` | Recognizing document types from built-in hints and the clinician's confirmed examples |
 | `worker.py` | Background work: identifying uploads, reading confirmed documents, then dating older facts |
 | `picture.py` | When each fact was true: which ongoing facts are current and which are earlier, worked out from the dates |
-| `assistant.py` | The command bar: questions and logging proposals |
+| `agent.py` | The chat's psychiatric NP assistant: its instructions, tools (ages, dates, rating scales) and the conversation it's given |
+| `ai.py` | Starts Ollama only when the AI is needed, stops it when MindChart quits, and lists models without starting it |
+| `assistant.py` | The command bar: questions and logging proposals (records features, on hold) |
 | `documents.py` | Reads PDF, image, Word, text and spreadsheet files (with OCR for scans, photos and pictures in Word files) |
-| `app.html`, `static/` | The app's page, styles and script (`static/tour.js`: the tour, help for each page, and the security explainer) |
-| `chat.html` | General chat with the local model |
+| `app.html`, `static/` | The app's page, styles and script (`static/chat.js`: the chat; `static/tour.js`: the tour, help for each page, and the security explainer) |
 | `updater.py` | Self-updates from GitHub releases |
 | `install.sh` | One-line installer |
 | `tools/MindChartApp.swift` | The Mac app: its window, menus, file pickers and Save dialogs |

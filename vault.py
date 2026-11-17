@@ -101,6 +101,11 @@ FACT_CORRECTIONS_TABLE = """CREATE TABLE IF NOT EXISTS fact_corrections (
 # How the clinician likes evaluations written, in general terms with no patient details, followed whenever the AI writes
 # one. The AI proposes them from the clinician's edits to drafts, and they're kept only once approved (or typed in Settings).
 WRITING_PREFERENCES_TABLE = """CREATE TABLE IF NOT EXISTS writing_preferences (id INTEGER PRIMARY KEY, text TEXT, added TEXT);"""
+# Conversations with the assistant (agent.py). They hold patient details, so they're kept here in the encrypted store.
+# "messages" is a JSON list of {"role": "user" or "assistant", "content", "at"}, plus "files" ([{"name", "text", "unclear"}],
+# the text read from attached files) on the clinician's messages, and "model" and "tools" (the tools it used) on replies.
+CHATS_TABLE = """CREATE TABLE IF NOT EXISTS chats (
+    id INTEGER PRIMARY KEY, uid TEXT UNIQUE NOT NULL, title TEXT, created TEXT, updated TEXT, messages TEXT);"""
 EXAMPLE_CHARS = 3000  # how much of a document's opening text is kept as an example
 GUIDANCE_EXAMPLES = 8  # how many recent corrections guide the reading of each type of document
 
@@ -453,7 +458,7 @@ def prepare_database(db):
         db.isolation_level = ""
     db.executescript("\n".join(table_sql(name) for name in OBJECTS) + SETTINGS_TABLE + FIELD_DEFS_TABLE
                      + RECORD_TYPES_TABLE + UPLOADS_TABLE + EXAMPLES_TABLE + GUARDIANSHIPS_TABLE + INCIDENT_PEOPLE_TABLE + COTTAGE_ANALYSES_TABLE
-                     + FACT_CORRECTIONS_TABLE + WRITING_PREFERENCES_TABLE + VIEWS)
+                     + FACT_CORRECTIONS_TABLE + WRITING_PREFERENCES_TABLE + CHATS_TABLE + VIEWS)
     seed_field_defs(db)
     seed_record_types(db)
     seed_cottages(db)
@@ -1924,6 +1929,66 @@ def change_writing_preference(number, text):
             db.execute("UPDATE writing_preferences SET text = ? WHERE id = ?", (text, number))
     log("deleted a writing preference" if text is None else "edited a writing preference", None,
         row[0] if text is None else f"{row[0]} → {text}")
+
+
+# --- Chats with the assistant -------------------------------------------------------
+
+def list_chats():
+    """Every chat, most recently used first: [{"id", "title", "updated"}]."""
+    with connect() as db:
+        return [{"id": r["uid"], "title": r["title"] or "New chat", "updated": r["updated"]}
+                for r in db.execute("SELECT uid, title, updated FROM chats ORDER BY updated DESC, id DESC")]
+
+
+def create_chat():
+    with connect() as db:
+        uid = new_uid("CH")
+        db.execute("INSERT INTO chats (uid, title, created, updated, messages) VALUES (?, '', ?, ?, '[]')", (uid, now(), now()))
+    log("started a chat", None, uid)
+    return uid
+
+
+def get_chat(uid, opened=False):
+    """A chat and its messages. opened: the clinician opened it (logged, like opening any record)."""
+    with connect() as db:
+        row = db.execute("SELECT * FROM chats WHERE uid = ?", (uid,)).fetchone()
+    if not row:
+        raise ValueError("That chat was deleted")
+    if opened:
+        log("opened a chat", None, uid)
+    return {"id": row["uid"], "title": row["title"] or "New chat", "created": row["created"], "updated": row["updated"],
+            "messages": json.loads(row["messages"] or "[]")}
+
+
+def add_chat_message(uid, message):
+    """Add a message to a chat. A chat without a title takes one from the clinician's first message."""
+    with connect() as db:
+        row = db.execute("SELECT title, messages FROM chats WHERE uid = ?", (uid,)).fetchone()
+        if not row:
+            raise ValueError("That chat was deleted")
+        messages = json.loads(row["messages"] or "[]") + [{**message, "at": now()}]
+        title = row["title"]
+        if not title and message["role"] == "user":
+            words = " ".join((message.get("content") or "").split()) or ", ".join(f["name"] for f in message.get("files") or [])
+            title = words if len(words) <= 60 else words[:60].rsplit(" ", 1)[0].rstrip(",.;:") + "…"  # (ending on a whole word)
+        db.execute("UPDATE chats SET messages = ?, title = ?, updated = ? WHERE uid = ?", (json.dumps(messages), title, now(), uid))
+
+
+def rename_chat(uid, title):
+    title = " ".join(str(title or "").split())[:80]
+    if not title:
+        raise ValueError("Give the chat a name")
+    with connect() as db:
+        if not db.execute("UPDATE chats SET title = ? WHERE uid = ?", (title, uid)).rowcount:
+            raise ValueError("That chat was deleted")
+
+
+def delete_chat(uid):
+    with connect() as db:
+        db.execute("DELETE FROM chats WHERE uid = ?", (uid,))
+    log("deleted a chat", None, uid)
+    with connect() as db:
+        db.execute("VACUUM")  # so the conversation doesn't linger in free space
 
 
 def draft_people(uid):

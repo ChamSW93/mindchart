@@ -262,7 +262,7 @@ class AIUnavailable(Exception):
     """The local AI (Ollama) isn't running, so nothing can be read right now."""
 
     def __init__(self):
-        super().__init__("The AI isn't running. Open Ollama and try again.")
+        super().__init__("The AI (Ollama) isn't answering. Try again; MindChart starts it when it's needed.")
 
 
 class BadReply(Exception):

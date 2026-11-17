@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import agent
+import ai
 import assistant
 import fields as fieldtypes
 import documents
@@ -44,10 +46,14 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODELS_URL = "http://localhost:11434/api/tags"
 MODEL = "gpt-oss:20b"  # used until another model is picked in the app
 PORT = int(os.environ.get("MINDCHART_PORT", 8000))  # the Mac app picks a free port and passes it here
+# The records features (people, uploads, documents and facts, cottages, incidents, medications, follow-ups, drafts) are on
+# hold while MindChart is a chat-first assistant (November 2026). Their code, data, routes and tests are kept in reserve:
+# MINDCHART_RECORDS=1 shows them again (and starts their background reading).
+RECORDS = os.environ.get("MINDCHART_RECORDS") == "1"
 MAX_UPLOAD_BYTES = 200 * 2**20  # 200 MB; larger uploads are refused rather than filling memory
 HERE = Path(__file__).parent
 CONTEXT_LENGTH = 16384  # how much text the chat model can see at once (in tokens)
-PAGES = {"/": "app.html", "/chat.html": "chat.html"}
+PAGES = {"/": "app.html"}  # (the chat lives in the app itself: static/chat.js)
 # Errors go to a log file the tester can send when something goes wrong. It records what failed and
 # where in the code, not record contents (database queries pass values separately, so they don't appear).
 LOG_FILE = Path.home() / "Library" / "Logs" / "MindChart" / "mindchart.log"
@@ -166,6 +172,55 @@ def write_draft(patient_uid, docs, model, thinking, reread, evaluation=False, he
         yield update
 
 
+# Chats (agent.py). On an 8 GB Mac the model reads and writes less at once, which keeps it within the Mac's memory.
+CHAT_CONTEXT = 8192 if HARDWARE["tier"] == "light" else 16384  # tokens the model reads and writes together
+CHAT_MAX_TOKENS = 2500 if HARDWARE["tier"] == "light" else 3000  # the longest answer
+CHAT_CONTEXT_CHARS = int((CHAT_CONTEXT - 1300 - CHAT_MAX_TOKENS) * 3.2)  # what's left for the conversation, at ~3.2 characters a token
+# Answers being written, by chat ID. Like evaluations, they're written here rather than inside the page's request, so a
+# dropped connection or a reload loses nothing: the page checks in on the answer as it grows.
+REPLIES = {}
+
+
+def answering(chat_uid):
+    return bool(REPLIES.get(chat_uid) and not REPLIES[chat_uid]["done"])
+
+
+def start_reply(chat_uid, model=None):
+    job = {"status": "", "text": "", "tools": [], "model": model or "", "done": False, "error": None, "stop": False}
+    REPLIES[chat_uid] = job
+    threading.Thread(target=write_reply, args=(job, chat_uid), daemon=True).start()
+    return job
+
+
+def write_reply(job, chat_uid):
+    """Write the assistant's answer to a chat's newest message, starting the AI first if it's off, and save it."""
+    try:
+        with keep_awake():
+            if not ai.running():
+                job["status"] = "Starting the AI…"
+            name, thinking = model_choice({"model": job["model"]})
+            job.update(status="", model=name)
+            messages = agent.model_messages(vault.get_chat(chat_uid)["messages"], vault.writing_preferences(), CHAT_CONTEXT_CHARS)
+
+            def add(chunk):
+                job["text"] += chunk
+                vault.touch()  # a long answer counts as activity, so MindChart stays unlocked
+            result = agent.reply(name, thinking, messages, add, should_stop=lambda: job["stop"], context_length=CHAT_CONTEXT,
+                                 max_tokens=CHAT_MAX_TOKENS)
+        job.update(tools=result["tools"], stopped=result["stopped"])
+        if result["text"].strip():
+            vault.add_chat_message(chat_uid, {"role": "assistant", "content": result["text"].strip(), "model": name, "tools": result["tools"],
+                                              **({"stopped": True} if result["stopped"] else {})})
+        elif not result["stopped"]:
+            job["error"] = ("The AI didn't answer. If this Mac is short of memory, close other apps or click Stop AI, then try again.")
+    except Exception as error:
+        if not isinstance(error, (ValueError, history.AIUnavailable)):
+            log.exception("A chat answer failed")  # (the log has no patient details)
+        job["error"] = str(error) or type(error).__name__
+    finally:
+        job.update(done=True, status="")
+
+
 def check_for_updates_forever():
     """Every few hours, note whether a newer version has been published (installed on the next start)."""
     while True:
@@ -177,9 +232,13 @@ def check_for_updates_forever():
 
 
 def list_models():
-    """The models downloaded with `ollama pull`, smallest first."""
-    with urllib.request.urlopen(OLLAMA_MODELS_URL) as response:
-        models = json.load(response)["models"]
+    """The models downloaded with `ollama pull`, smallest first. While the AI is off they're read from disk, so listing
+    them doesn't start it (whether a model can think is only known once it's on)."""
+    if not ai.running():
+        models = ai.installed_on_disk()
+    else:
+        with urllib.request.urlopen(OLLAMA_MODELS_URL) as response:
+            models = json.load(response)["models"]
     return [
         {"name": m["name"], "size_gb": round(m["size"] / 1e9, 1), "thinking": "thinking" in m.get("capabilities", []),
          # Models bigger than the GPU's share of memory spill onto the slower processor.
@@ -195,7 +254,9 @@ def default_model(available):
 
 
 def model_choice(payload):
-    """The model the page asked for, and whether it can think (reason before answering)."""
+    """The model the page asked for, and whether it can think (reason before answering). The clinician asked for the AI,
+    so it's started if it's off (background work never starts it: background_model)."""
+    ai.ensure_running()
     name = payload.get("model") or default_model(list_models())
     return name, can_think(name)
 
@@ -320,7 +381,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # Signing in. The password is passed straight to macOS and never kept (Touch ID keeps it sealed: touchid.py).
         if is_("GET", "session"):
-            return {**vault.status(), "app_name": APP_NAME, "touch_id": touchid.is_on()}
+            return {**vault.status(), "app_name": APP_NAME, "touch_id": touchid.is_on(), "records": RECORDS}
         if is_("POST", "session", "setup"):
             vault.create(data["password"], data.get("name", ""))
             return vault.status()
@@ -344,11 +405,60 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if is_("GET", "models"):
             available = list_models()
             return {"models": available, "default": default_model(available)}
+        if is_("GET", "ai"):  # whether the AI is on, starting or off, and which models are loaded
+            return ai.status()
+        if is_("POST", "ai", "stop"):  # free the memory it uses; it starts again when next needed
+            ai.stop()
+            return ai.status()
         if is_("GET", "system"):
             return {**HARDWARE, "version": UPDATE, "download": DOWNLOAD}
 
         if not vault.is_unlocked():
             raise PermissionError("MindChart is locked")
+
+        # Chats with the assistant (agent.py): the heart of MindChart while the records features are on hold
+        if is_("GET", "chats"):
+            return {"chats": vault.list_chats()}
+        if is_("POST", "chats"):
+            return {"id": vault.create_chat()}
+        if is_("GET", "chats", "*"):  # a chat, and the answer still being written to it, if any
+            job = REPLIES.get(args[0])
+            return {**vault.get_chat(args[0], opened=True), "reply": job if answering(args[0]) else None}
+        if is_("GET", "chats", "*", "reply"):  # the answer being written, as far as it's got (checked every moment)
+            if args[0] not in REPLIES:
+                raise ValueError("No answer is being written in this chat")
+            return REPLIES[args[0]]
+        if is_("POST", "chats", "*", "messages"):  # the clinician's message (with any attached files' text); the answer follows
+            if answering(args[0]):
+                raise ValueError("Wait for the answer to finish, or stop it, first")
+            files = [{"name": str(f.get("name") or "file")[:200], "text": str(f.get("text") or ""), "unclear": list(f.get("unclear") or [])}
+                     for f in data.get("files") or []]
+            text = str(data.get("text") or "").strip()
+            if not text and not files:
+                raise ValueError("Type a message first")
+            scored = agent.score_scales(text)  # (scored exactly, and shown with the message)
+            vault.add_chat_message(args[0], {"role": "user", "content": text, "files": files, **({"scored": scored} if scored else {})})
+            start_reply(args[0], data.get("model"))
+            return {}
+        if is_("POST", "chats", "*", "retry"):  # answer the last message again (after an error)
+            messages = vault.get_chat(args[0])["messages"]
+            if answering(args[0]) or not messages or messages[-1]["role"] != "user":
+                raise ValueError("There's no unanswered message to try again")
+            start_reply(args[0], data.get("model"))
+            return {}
+        if is_("POST", "chats", "*", "stop"):  # stop the answer being written; what's written so far is kept
+            if answering(args[0]):
+                REPLIES[args[0]]["stop"] = True
+            return {}
+        if is_("POST", "chats", "*"):
+            vault.rename_chat(args[0], data.get("title"))
+            return {}
+        if is_("POST", "chats", "*", "delete"):
+            if answering(args[0]):
+                REPLIES[args[0]]["stop"] = True
+            vault.delete_chat(args[0])
+            REPLIES.pop(args[0], None)
+            return {}
 
         if is_("GET", "settings"):
             return {"user_name": vault.get_setting("user_name"), "filevault": filevault_on(), "data_location": str(vault.IMAGE),
@@ -616,7 +726,8 @@ if __name__ == "__main__":
     threading.Thread(target=vault.auto_lock_forever, daemon=True).start()
     threading.Thread(target=check_for_updates_forever, daemon=True).start()
     threading.Thread(target=download_recommended_model, daemon=True).start()
-    threading.Thread(target=worker.run_forever, args=(background_model,), daemon=True).start()
+    if RECORDS:  # (reading uploaded documents in the background is part of the records features)
+        threading.Thread(target=worker.run_forever, args=(background_model,), daemon=True).start()
     if os.environ.get("MINDCHART_APP"):
         threading.Thread(target=stop_when_app_quits, daemon=True).start()
     # Closing the Terminal window sends SIGHUP; exiting cleanly lets the data lock on the way out.
@@ -626,3 +737,4 @@ if __name__ == "__main__":
         http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
     finally:
         vault.lock("locked because the app was closed")
+        ai.shut_down()  # the Ollama MindChart started stops with it
